@@ -17,6 +17,7 @@
 #include <winuser.h>
 #include <winnls.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <dwmapi.h>
 #undef WIN32_NO_STATUS
 #include <ntstatus.h>
@@ -34,16 +35,15 @@
 #ifndef DWMSBT_MAINWINDOW
 #define DWMSBT_MAINWINDOW     2
 #endif
-#ifndef MOD_NOREPEAT
-#define MOD_NOREPEAT          0x4000
-#endif
 
 #define AI_BAR_CLASS          L"LiberNtAiShellBar"
 #define AI_DESC_CLASS         L"LiberNtAiDescEditor"
 
 #define ID_HOTKEY_WIN_SPACE   1
-#define ID_HOTKEY_ALT_SPACE   2
+#define ID_HOTKEY_CTRL_ALT    2
+#define ID_HOTKEY_CTRL_SHIFT  3
 #define ID_TIMER_SEARCH       101
+#define ID_TRAY_ICON          102
 
 #define IDC_INPUT             201
 #define IDC_BTN_ASK           202
@@ -53,17 +53,43 @@
 #define IDC_APPROVAL_LABEL    206
 #define IDC_BTN_APPROVE       207
 #define IDC_BTN_DENY          208
+#define IDC_BAR_HEADER        209
 
-#define IDC_DESC_EDIT         301
-#define IDC_DESC_SAVE         302
-#define IDC_DESC_AUTO         303
-#define IDC_DESC_CLEAR        304
-#define IDC_DESC_CLOSE        305
-#define IDC_DESC_STATUS       306
+#define IDC_DESC_TITLE        300
+#define IDC_DESC_PATH         301
+#define IDC_DESC_BADGE        302
+#define IDC_DESC_EDIT         303
+#define IDC_DESC_SAVE         304
+#define IDC_DESC_AUTO         305
+#define IDC_DESC_CLEAR        306
+#define IDC_DESC_CLOSE        307
+#define IDC_DESC_STATUS       308
+
+#define IDM_TRAY_OPEN         401
+#define IDM_TRAY_INDEX        402
+#define IDM_TRAY_EXIT         403
 
 #define WM_AI_TOGGLE_BAR      (WM_APP + 1)
 #define WM_AI_AGENT_DONE      (WM_APP + 2)
 #define WM_AI_SEARCH_DONE     (WM_APP + 3)
+#define WM_AI_TRAY            (WM_APP + 4)
+
+/* Modern dark theme palette */
+#define AI_COL_BG             RGB(20, 22, 28)
+#define AI_COL_SURFACE        RGB(30, 34, 43)
+#define AI_COL_BORDER         RGB(62, 70, 88)
+#define AI_COL_TEXT           RGB(238, 242, 248)
+#define AI_COL_MUTED          RGB(152, 162, 182)
+#define AI_COL_ACCENT         RGB(42, 122, 232)
+#define AI_COL_ACCENT_DARK    RGB(30, 96, 192)
+#define AI_COL_BTN_BG         RGB(42, 47, 59)
+#define AI_COL_BTN_DOWN       RGB(56, 63, 79)
+#define AI_COL_BTN_BORDER     RGB(76, 85, 104)
+#define AI_COL_DANGER_BG      RGB(92, 36, 44)
+#define AI_COL_DANGER_DOWN    RGB(118, 44, 54)
+#define AI_COL_DANGER_BORDER  RGB(156, 64, 76)
+#define AI_COL_WARN_BG        RGB(74, 52, 18)
+#define AI_COL_WARN_TEXT      RGB(255, 224, 130)
 
 typedef struct _AI_ALPC_PACKET
 {
@@ -96,7 +122,15 @@ typedef struct _AI_SEARCH_RESULT_PACK
     AI_SEARCH_HIT Hits[AI_MAX_SEARCH_RESULTS];
 } AI_SEARCH_RESULT_PACK;
 
+typedef enum _AI_BTN_STYLE
+{
+    AiBtnSecondary = 0,
+    AiBtnPrimary = 1,
+    AiBtnDanger = 2
+} AI_BTN_STYLE;
+
 static HWND g_MainHwnd = NULL;
+static HWND g_HeaderHwnd = NULL;
 static HWND g_InputHwnd = NULL;
 static HWND g_ResultsHwnd = NULL;
 static HWND g_OutputHwnd = NULL;
@@ -104,11 +138,13 @@ static HWND g_ApprovalLabel = NULL;
 static HWND g_ApproveBtn = NULL;
 static HWND g_DenyBtn = NULL;
 static WNDPROC g_OrigInputProc = NULL;
-static HFONT g_UiFont = NULL;
-static HFONT g_TitleFont = NULL;
+static HFONT g_FontTitle = NULL;
+static HFONT g_FontUi = NULL;
+static HFONT g_FontSmall = NULL;
 static HBRUSH g_BgBrush = NULL;
-static HBRUSH g_EditBrush = NULL;
+static HBRUSH g_SurfaceBrush = NULL;
 static HBRUSH g_WarnBrush = NULL;
+static BOOL g_TrayAdded = FALSE;
 static DWORD g_PendingApprovalId = 0;
 static AI_SEARCH_HIT g_LastHits[AI_MAX_SEARCH_RESULTS];
 static DWORD g_LastHitCount = 0;
@@ -150,6 +186,85 @@ static void ApplyDwmStyling(HWND Hwnd)
     DwmSetWindowAttribute(Hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &Dark, sizeof(Dark));
     DwmSetWindowAttribute(Hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &CornerPref, sizeof(CornerPref));
     DwmSetWindowAttribute(Hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &Backdrop, sizeof(Backdrop));
+}
+
+static HFONT CreateUiFont(int HeightPx, int Weight)
+{
+    return CreateFontW(
+        -HeightPx, 0, 0, 0, Weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+}
+
+static void DrawFramedBox(HDC Hdc, int X, int Y, int W, int H, COLORREF Fill, COLORREF Border)
+{
+    HBRUSH Br = CreateSolidBrush(Fill);
+    HPEN Pen = CreatePen(PS_SOLID, 1, Border);
+    HGDIOBJ OldBr = SelectObject(Hdc, Br);
+    HGDIOBJ OldPen = SelectObject(Hdc, Pen);
+
+    RoundRect(Hdc, X, Y, X + W, Y + H, 8, 8);
+
+    SelectObject(Hdc, OldPen);
+    SelectObject(Hdc, OldBr);
+    DeleteObject(Pen);
+    DeleteObject(Br);
+}
+
+static void DrawModernButton(const DRAWITEMSTRUCT *Dis, AI_BTN_STYLE Style, HFONT Font)
+{
+    HDC Hdc = Dis->hDC;
+    RECT Rc = Dis->rcItem;
+    BOOL Pressed = (Dis->itemState & ODS_SELECTED) != 0;
+    BOOL Focused = (Dis->itemState & ODS_FOCUS) != 0;
+    COLORREF Fill;
+    COLORREF Border;
+    COLORREF TextCol = AI_COL_TEXT;
+    WCHAR Text[64];
+    HBRUSH Br;
+    HPEN Pen;
+    HGDIOBJ OldBr;
+    HGDIOBJ OldPen;
+    HGDIOBJ OldFont;
+
+    if (Style == AiBtnPrimary)
+    {
+        Fill = Pressed ? AI_COL_ACCENT_DARK : AI_COL_ACCENT;
+        Border = Focused ? RGB(130, 185, 255) : AI_COL_ACCENT;
+    }
+    else if (Style == AiBtnDanger)
+    {
+        Fill = Pressed ? AI_COL_DANGER_DOWN : AI_COL_DANGER_BG;
+        Border = Focused ? RGB(220, 110, 120) : AI_COL_DANGER_BORDER;
+    }
+    else
+    {
+        Fill = Pressed ? AI_COL_BTN_DOWN : AI_COL_BTN_BG;
+        Border = Focused ? AI_COL_ACCENT : AI_COL_BTN_BORDER;
+    }
+
+    Br = CreateSolidBrush(AI_COL_BG);
+    FillRect(Hdc, &Rc, Br);
+    DeleteObject(Br);
+
+    Br = CreateSolidBrush(Fill);
+    Pen = CreatePen(PS_SOLID, 1, Border);
+    OldBr = SelectObject(Hdc, Br);
+    OldPen = SelectObject(Hdc, Pen);
+    RoundRect(Hdc, Rc.left, Rc.top, Rc.right, Rc.bottom, 8, 8);
+    SelectObject(Hdc, OldPen);
+    SelectObject(Hdc, OldBr);
+    DeleteObject(Pen);
+    DeleteObject(Br);
+
+    Text[0] = UNICODE_NULL;
+    GetWindowTextW(Dis->hwndItem, Text, ARRAYSIZE(Text));
+    SetBkMode(Hdc, TRANSPARENT);
+    SetTextColor(Hdc, TextCol);
+    OldFont = Font ? SelectObject(Hdc, Font) : NULL;
+    DrawTextW(Hdc, Text, -1, &Rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (OldFont)
+        SelectObject(Hdc, OldFont);
 }
 
 /* ==================== Session 1 Desktop ALPC Bridge ==================== */
@@ -388,6 +503,36 @@ static DWORD WINAPI AgentWorkerThread(LPVOID Param)
     return 0;
 }
 
+static void AddTrayIcon(HWND Hwnd)
+{
+    NOTIFYICONDATAW Nid;
+
+    memset(&Nid, 0, sizeof(Nid));
+    Nid.cbSize = sizeof(Nid);
+    Nid.hWnd = Hwnd;
+    Nid.uID = ID_TRAY_ICON;
+    Nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    Nid.uCallbackMessage = WM_AI_TRAY;
+    Nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    lstrcpynW(Nid.szTip, L"LiberNT AI (Win+Space / Ctrl+Shift+Space)", ARRAYSIZE(Nid.szTip));
+    if (Shell_NotifyIconW(NIM_ADD, &Nid))
+        g_TrayAdded = TRUE;
+}
+
+static void RemoveTrayIcon(HWND Hwnd)
+{
+    NOTIFYICONDATAW Nid;
+
+    if (!g_TrayAdded)
+        return;
+    memset(&Nid, 0, sizeof(Nid));
+    Nid.cbSize = sizeof(Nid);
+    Nid.hWnd = Hwnd;
+    Nid.uID = ID_TRAY_ICON;
+    Shell_NotifyIconW(NIM_DELETE, &Nid);
+    g_TrayAdded = FALSE;
+}
+
 static void SetApprovalBannerVisible(BOOL Visible, const AI_PROMPT_RESPONSE *Resp)
 {
     if (Visible && Resp != NULL)
@@ -397,7 +542,7 @@ static void SetApprovalBannerVisible(BOOL Visible, const AI_PROMPT_RESPONSE *Res
 
         g_PendingApprovalId = Resp->ApprovalId;
         _snprintf(MsgUtf8, sizeof(MsgUtf8),
-                  "Tier %u Approval Required: %s  ->  %s",
+                  "  Tier %u Approval Required: %s  ->  %s",
                   Resp->ToolTier, Resp->ToolName,
                   Resp->ToolTarget[0] ? Resp->ToolTarget : "(none)");
         MsgUtf8[sizeof(MsgUtf8) - 1] = '\0';
@@ -414,6 +559,8 @@ static void SetApprovalBannerVisible(BOOL Visible, const AI_PROMPT_RESPONSE *Res
         ShowWindow(g_ApproveBtn, SW_HIDE);
         ShowWindow(g_DenyBtn, SW_HIDE);
     }
+    if (g_MainHwnd != NULL)
+        InvalidateRect(g_MainHwnd, NULL, TRUE);
 }
 
 static void SubmitBarPrompt(DWORD Mode)
@@ -476,8 +623,8 @@ static void ToggleCommandBar(HWND Hwnd, BOOL ForceShow)
 
     {
         int ScrW = GetSystemMetrics(SM_CXSCREEN);
-        int BarW = 740;
-        int BarH = 440;
+        int BarW = 760;
+        int BarH = 472;
         SetWindowPos(Hwnd, HWND_TOPMOST, (ScrW - BarW) / 2, 72, BarW, BarH, SWP_SHOWWINDOW);
         SetForegroundWindow(Hwnd);
         SetFocus(g_InputHwnd);
@@ -509,80 +656,143 @@ static LRESULT CALLBACK MainBarWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARA
     {
         case WM_CREATE:
         {
+            BOOL HkWin, HkCtrlAlt, HkCtrlShift;
+            CHAR Dbg[160];
+
             ApplyDwmStyling(Hwnd);
 
-            g_TitleFont = CreateFontW(-16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                      CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_UiFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                   CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_BgBrush = CreateSolidBrush(RGB(24, 26, 32));
-            g_EditBrush = CreateSolidBrush(RGB(34, 38, 46));
-            g_WarnBrush = CreateSolidBrush(RGB(72, 50, 18));
+            g_FontTitle = CreateUiFont(15, FW_SEMIBOLD);
+            g_FontUi = CreateUiFont(14, FW_NORMAL);
+            g_FontSmall = CreateUiFont(12, FW_NORMAL);
+            g_BgBrush = CreateSolidBrush(AI_COL_BG);
+            g_SurfaceBrush = CreateSolidBrush(AI_COL_SURFACE);
+            g_WarnBrush = CreateSolidBrush(AI_COL_WARN_BG);
+
+            g_HeaderHwnd = CreateWindowExW(
+                0, L"STATIC", L"LiberNT AI   \x2022   Win+Space / Ctrl+Shift+Space   (Esc to hide)",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                20, 14, 720, 20, Hwnd, (HMENU)IDC_BAR_HEADER, NULL, NULL);
+            SendMessageW(g_HeaderHwnd, WM_SETFONT, (WPARAM)g_FontSmall, TRUE);
 
             g_InputHwnd = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                0, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                16, 16, 540, 32, Hwnd, (HMENU)IDC_INPUT, NULL, NULL);
-            SendMessageW(g_InputHwnd, WM_SETFONT, (WPARAM)g_TitleFont, TRUE);
+                26, 48, 536, 24, Hwnd, (HMENU)IDC_INPUT, NULL, NULL);
+            SendMessageW(g_InputHwnd, WM_SETFONT, (WPARAM)g_FontTitle, TRUE);
+            SendMessageW(g_InputHwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
             g_OrigInputProc = (WNDPROC)SetWindowLongPtrW(g_InputHwnd, GWLP_WNDPROC, (LONG_PTR)InputSubclassProc);
 
-            {
-                HWND BtnAsk = CreateWindowExW(
-                    0, L"BUTTON", L"Ask",
-                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    568, 16, 72, 32, Hwnd, (HMENU)IDC_BTN_ASK, NULL, NULL);
-                HWND BtnDo = CreateWindowExW(
-                    0, L"BUTTON", L"Do",
-                    WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                    650, 16, 72, 32, Hwnd, (HMENU)IDC_BTN_DO, NULL, NULL);
-                SendMessageW(BtnAsk, WM_SETFONT, (WPARAM)g_UiFont, TRUE);
-                SendMessageW(BtnDo, WM_SETFONT, (WPARAM)g_UiFont, TRUE);
-            }
+            CreateWindowExW(
+                0, L"BUTTON", L"Ask",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                580, 42, 74, 34, Hwnd, (HMENU)IDC_BTN_ASK, NULL, NULL);
+            CreateWindowExW(
+                0, L"BUTTON", L"Do",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                664, 42, 76, 34, Hwnd, (HMENU)IDC_BTN_DO, NULL, NULL);
 
             g_ResultsHwnd = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"LISTBOX", NULL,
+                0, L"LISTBOX", NULL,
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                16, 60, 706, 138, Hwnd, (HMENU)IDC_RESULTS, NULL, NULL);
-            SendMessageW(g_ResultsHwnd, WM_SETFONT, (WPARAM)g_UiFont, TRUE);
+                26, 94, 708, 132, Hwnd, (HMENU)IDC_RESULTS, NULL, NULL);
+            SendMessageW(g_ResultsHwnd, WM_SETFONT, (WPARAM)g_FontUi, TRUE);
 
             g_ApprovalLabel = CreateWindowExW(
                 0, L"STATIC", L"",
-                WS_CHILD | SS_LEFT | SS_NOPREFIX,
-                16, 208, 520, 28, Hwnd, (HMENU)IDC_APPROVAL_LABEL, NULL, NULL);
-            SendMessageW(g_ApprovalLabel, WM_SETFONT, (WPARAM)g_UiFont, TRUE);
+                WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOPREFIX,
+                20, 240, 534, 32, Hwnd, (HMENU)IDC_APPROVAL_LABEL, NULL, NULL);
+            SendMessageW(g_ApprovalLabel, WM_SETFONT, (WPARAM)g_FontUi, TRUE);
 
             g_ApproveBtn = CreateWindowExW(
                 0, L"BUTTON", L"Approve",
-                WS_CHILD | BS_PUSHBUTTON,
-                546, 206, 84, 28, Hwnd, (HMENU)IDC_BTN_APPROVE, NULL, NULL);
+                WS_CHILD | BS_OWNERDRAW,
+                564, 240, 84, 32, Hwnd, (HMENU)IDC_BTN_APPROVE, NULL, NULL);
             g_DenyBtn = CreateWindowExW(
                 0, L"BUTTON", L"Deny",
-                WS_CHILD | BS_PUSHBUTTON,
-                638, 206, 84, 28, Hwnd, (HMENU)IDC_BTN_DENY, NULL, NULL);
-            SendMessageW(g_ApproveBtn, WM_SETFONT, (WPARAM)g_UiFont, TRUE);
-            SendMessageW(g_DenyBtn, WM_SETFONT, (WPARAM)g_UiFont, TRUE);
+                WS_CHILD | BS_OWNERDRAW,
+                656, 240, 84, 32, Hwnd, (HMENU)IDC_BTN_DENY, NULL, NULL);
 
             g_OutputHwnd = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"LiberNT AI ready. Type to search files & folder descriptions, or press Enter for agent mode.",
+                0, L"EDIT", L"Type to search files & folder descriptions, or press Enter for AI agent mode.",
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-                16, 244, 706, 178, Hwnd, (HMENU)IDC_OUTPUT, NULL, NULL);
-            SendMessageW(g_OutputHwnd, WM_SETFONT, (WPARAM)g_UiFont, TRUE);
+                26, 286, 708, 162, Hwnd, (HMENU)IDC_OUTPUT, NULL, NULL);
+            SendMessageW(g_OutputHwnd, WM_SETFONT, (WPARAM)g_FontUi, TRUE);
+            SendMessageW(g_OutputHwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
 
-            RegisterHotKey(Hwnd, ID_HOTKEY_WIN_SPACE, MOD_WIN | MOD_NOREPEAT, VK_SPACE);
-            RegisterHotKey(Hwnd, ID_HOTKEY_ALT_SPACE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE);
+            /* Note: LiberNT win32k rejects MOD_NOREPEAT, so use pure modifier masks */
+            HkWin = RegisterHotKey(Hwnd, ID_HOTKEY_WIN_SPACE, MOD_WIN, VK_SPACE);
+            HkCtrlAlt = RegisterHotKey(Hwnd, ID_HOTKEY_CTRL_ALT, MOD_CONTROL | MOD_ALT, VK_SPACE);
+            HkCtrlShift = RegisterHotKey(Hwnd, ID_HOTKEY_CTRL_SHIFT, MOD_CONTROL | MOD_SHIFT, VK_SPACE);
+            _snprintf(Dbg, sizeof(Dbg),
+                      "aishell: RegisterHotKey win+space=%d ctrl+alt+space=%d ctrl+shift+space=%d\n",
+                      HkWin ? 1 : 0, HkCtrlAlt ? 1 : 0, HkCtrlShift ? 1 : 0);
+            OutputDebugStringA(Dbg);
+
+            AddTrayIcon(Hwnd);
             return 0;
         }
 
         case WM_HOTKEY:
-            if (WParam == ID_HOTKEY_WIN_SPACE || WParam == ID_HOTKEY_ALT_SPACE)
+            if (WParam == ID_HOTKEY_WIN_SPACE ||
+                WParam == ID_HOTKEY_CTRL_ALT ||
+                WParam == ID_HOTKEY_CTRL_SHIFT)
+            {
                 ToggleCommandBar(Hwnd, FALSE);
+            }
             return 0;
 
         case WM_AI_TOGGLE_BAR:
             ToggleCommandBar(Hwnd, WParam != 0);
             return 0;
+
+        case WM_AI_TRAY:
+            if (LParam == WM_LBUTTONUP || LParam == WM_LBUTTONDBLCLK)
+            {
+                ToggleCommandBar(Hwnd, FALSE);
+            }
+            else if (LParam == WM_RBUTTONUP)
+            {
+                HMENU Menu = CreatePopupMenu();
+                POINT Pt;
+                GetCursorPos(&Pt);
+                AppendMenuW(Menu, MF_STRING, IDM_TRAY_OPEN, L"Open LiberNT AI Bar");
+                AppendMenuW(Menu, MF_STRING, IDM_TRAY_INDEX, L"Re-index NTFS Folders");
+                AppendMenuW(Menu, MF_SEPARATOR, 0, NULL);
+                AppendMenuW(Menu, MF_STRING, IDM_TRAY_EXIT, L"Exit");
+                SetForegroundWindow(Hwnd);
+                TrackPopupMenu(Menu, TPM_RIGHTBUTTON, Pt.x, Pt.y, 0, Hwnd, NULL);
+                DestroyMenu(Menu);
+            }
+            return 0;
+
+        case WM_DRAWITEM:
+        {
+            const DRAWITEMSTRUCT *Dis = (const DRAWITEMSTRUCT *)LParam;
+            if (Dis->CtlID == IDC_BTN_DO || Dis->CtlID == IDC_BTN_APPROVE)
+                DrawModernButton(Dis, AiBtnPrimary, g_FontUi);
+            else if (Dis->CtlID == IDC_BTN_DENY)
+                DrawModernButton(Dis, AiBtnDanger, g_FontUi);
+            else
+                DrawModernButton(Dis, AiBtnSecondary, g_FontUi);
+            return TRUE;
+        }
+
+        case WM_PAINT:
+        {
+            PAINTSTRUCT Ps;
+            HDC Hdc = BeginPaint(Hwnd, &Ps);
+            RECT Rc;
+
+            GetClientRect(Hwnd, &Rc);
+            FillRect(Hdc, &Rc, g_BgBrush);
+
+            DrawFramedBox(Hdc, 18, 40, 552, 38, AI_COL_SURFACE, AI_COL_BORDER);
+            DrawFramedBox(Hdc, 18, 86, 724, 146, AI_COL_SURFACE, AI_COL_BORDER);
+            DrawFramedBox(Hdc, 18, 278, 724, 178, AI_COL_SURFACE, AI_COL_BORDER);
+
+            EndPaint(Hwnd, &Ps);
+            return 0;
+        }
 
         case WM_COMMAND:
         {
@@ -608,6 +818,23 @@ static LRESULT CALLBACK MainBarWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARA
             else if (Id == IDC_BTN_DENY)
             {
                 SubmitBarApproval(FALSE);
+            }
+            else if (Id == IDM_TRAY_OPEN)
+            {
+                ToggleCommandBar(Hwnd, TRUE);
+            }
+            else if (Id == IDM_TRAY_INDEX)
+            {
+                HANDLE Port = NULL;
+                if (AiClientConnect(&Port) == AiStatusOk)
+                {
+                    AiClientIndexNow(Port, NULL);
+                    AiClientClose(Port);
+                }
+            }
+            else if (Id == IDM_TRAY_EXIT)
+            {
+                DestroyWindow(Hwnd);
             }
             else if (Id == IDC_RESULTS && Code == LBN_DBLCLK)
             {
@@ -694,13 +921,9 @@ static LRESULT CALLBACK MainBarWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARA
             {
                 WCHAR ReplyW[AI_MAX_REPLY_UTF8];
                 if (Resp->State == AiPromptPendingApproval)
-                {
                     SetApprovalBannerVisible(TRUE, Resp);
-                }
                 else
-                {
                     SetApprovalBannerVisible(FALSE, NULL);
-                }
                 Utf8ToWide(Resp->ReplyText, ReplyW, ARRAYSIZE(ReplyW));
                 SetWindowTextW(g_OutputHwnd, ReplyW);
                 free(Resp);
@@ -712,41 +935,43 @@ static LRESULT CALLBACK MainBarWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARA
             SetBkMode((HDC)WParam, OPAQUE);
             if ((HWND)LParam == g_ApprovalLabel)
             {
-                SetTextColor((HDC)WParam, RGB(255, 224, 130));
-                SetBkColor((HDC)WParam, RGB(72, 50, 18));
+                SetTextColor((HDC)WParam, AI_COL_WARN_TEXT);
+                SetBkColor((HDC)WParam, AI_COL_WARN_BG);
                 return (LRESULT)g_WarnBrush;
             }
-            SetTextColor((HDC)WParam, RGB(224, 228, 236));
-            SetBkColor((HDC)WParam, RGB(34, 38, 46));
-            return (LRESULT)g_EditBrush;
+            if ((HWND)LParam == g_HeaderHwnd)
+            {
+                SetTextColor((HDC)WParam, AI_COL_MUTED);
+                SetBkColor((HDC)WParam, AI_COL_BG);
+                return (LRESULT)g_BgBrush;
+            }
+            SetTextColor((HDC)WParam, AI_COL_TEXT);
+            SetBkColor((HDC)WParam, AI_COL_SURFACE);
+            return (LRESULT)g_SurfaceBrush;
 
         case WM_CTLCOLOREDIT:
         case WM_CTLCOLORLISTBOX:
-            SetTextColor((HDC)WParam, RGB(236, 240, 248));
-            SetBkColor((HDC)WParam, RGB(34, 38, 46));
-            return (LRESULT)g_EditBrush;
-
-        case WM_ERASEBKGND:
-        {
-            RECT Rc;
-            GetClientRect(Hwnd, &Rc);
-            FillRect((HDC)WParam, &Rc, g_BgBrush);
-            return 1;
-        }
+            SetTextColor((HDC)WParam, AI_COL_TEXT);
+            SetBkColor((HDC)WParam, AI_COL_SURFACE);
+            return (LRESULT)g_SurfaceBrush;
 
         case WM_DESTROY:
+            RemoveTrayIcon(Hwnd);
             UnregisterHotKey(Hwnd, ID_HOTKEY_WIN_SPACE);
-            UnregisterHotKey(Hwnd, ID_HOTKEY_ALT_SPACE);
+            UnregisterHotKey(Hwnd, ID_HOTKEY_CTRL_ALT);
+            UnregisterHotKey(Hwnd, ID_HOTKEY_CTRL_SHIFT);
             if (g_BgBrush)
                 DeleteObject(g_BgBrush);
-            if (g_EditBrush)
-                DeleteObject(g_EditBrush);
+            if (g_SurfaceBrush)
+                DeleteObject(g_SurfaceBrush);
             if (g_WarnBrush)
                 DeleteObject(g_WarnBrush);
-            if (g_UiFont)
-                DeleteObject(g_UiFont);
-            if (g_TitleFont)
-                DeleteObject(g_TitleFont);
+            if (g_FontTitle)
+                DeleteObject(g_FontTitle);
+            if (g_FontUi)
+                DeleteObject(g_FontUi);
+            if (g_FontSmall)
+                DeleteObject(g_FontSmall);
             PostQuitMessage(0);
             return 0;
     }
@@ -754,14 +979,53 @@ static LRESULT CALLBACK MainBarWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARA
     return DefWindowProcW(Hwnd, Msg, WParam, LParam);
 }
 
-/* ==================== Folder Description Editor Dialog ==================== */
+/* ==================== Modern Folder Description Editor ==================== */
 
 typedef struct _DESC_EDITOR_STATE
 {
     WCHAR FolderPath[MAX_PATH];
+    HWND TitleHwnd;
+    HWND PathHwnd;
+    HWND BadgeHwnd;
     HWND EditHwnd;
     HWND StatusHwnd;
+    HFONT FontTitle;
+    HFONT FontUi;
+    HFONT FontSmall;
+    HBRUSH BgBrush;
+    HBRUSH SurfaceBrush;
+    WNDPROC OrigEditProc;
 } DESC_EDITOR_STATE;
+
+static void UpdateDescBadge(DESC_EDITOR_STATE *St, const char *Source)
+{
+    if (Source != NULL && strcmp(Source, "user") == 0)
+        SetWindowTextW(St->BadgeHwnd, L"Source: User (Pinned)");
+    else if (Source != NULL && strcmp(Source, "ai") == 0)
+        SetWindowTextW(St->BadgeHwnd, L"Source: AI Generated");
+    else
+        SetWindowTextW(St->BadgeHwnd, L"Source: None");
+}
+
+static LRESULT CALLBACK DescEditSubclassProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARAM LParam)
+{
+    DESC_EDITOR_STATE *St = (DESC_EDITOR_STATE *)GetWindowLongPtrW(GetParent(Hwnd), GWLP_USERDATA);
+
+    if (Msg == WM_KEYDOWN)
+    {
+        if (WParam == VK_ESCAPE)
+        {
+            DestroyWindow(GetParent(Hwnd));
+            return 0;
+        }
+        if (WParam == VK_RETURN && (GetKeyState(VK_CONTROL) & 0x8000))
+        {
+            PostMessageW(GetParent(Hwnd), WM_COMMAND, MAKEWPARAM(IDC_DESC_SAVE, BN_CLICKED), 0);
+            return 0;
+        }
+    }
+    return CallWindowProcW(St->OrigEditProc, Hwnd, Msg, WParam, LParam);
+}
 
 static LRESULT CALLBACK DescEditorWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARAM LParam)
 {
@@ -775,45 +1039,117 @@ static LRESULT CALLBACK DescEditorWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LP
             char DescUtf8[AI_MAX_DESC_UTF8];
             char SrcUtf8[AI_MAX_SOURCE_UTF8];
             WCHAR DescW[AI_MAX_DESC_UTF8];
-            WCHAR HeaderW[MAX_PATH + 32];
 
             St = (DESC_EDITOR_STATE *)Cs->lpCreateParams;
             SetWindowLongPtrW(Hwnd, GWLP_USERDATA, (LONG_PTR)St);
             ApplyDwmStyling(Hwnd);
 
-            _snwprintf(HeaderW, ARRAYSIZE(HeaderW), L"Folder: %s", St->FolderPath);
-            HeaderW[ARRAYSIZE(HeaderW) - 1] = UNICODE_NULL;
+            St->FontTitle = CreateUiFont(16, FW_SEMIBOLD);
+            St->FontUi = CreateUiFont(14, FW_NORMAL);
+            St->FontSmall = CreateUiFont(12, FW_NORMAL);
+            St->BgBrush = CreateSolidBrush(AI_COL_BG);
+            St->SurfaceBrush = CreateSolidBrush(AI_COL_SURFACE);
 
-            CreateWindowExW(0, L"STATIC", HeaderW, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                            14, 12, 472, 22, Hwnd, NULL, NULL, NULL);
+            St->TitleHwnd = CreateWindowExW(
+                0, L"STATIC", L"Folder Description",
+                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                20, 16, 260, 24, Hwnd, (HMENU)IDC_DESC_TITLE, NULL, NULL);
+            SendMessageW(St->TitleHwnd, WM_SETFONT, (WPARAM)St->FontTitle, TRUE);
+
+            St->BadgeHwnd = CreateWindowExW(
+                0, L"STATIC", L"Source: None",
+                WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                300, 18, 224, 20, Hwnd, (HMENU)IDC_DESC_BADGE, NULL, NULL);
+            SendMessageW(St->BadgeHwnd, WM_SETFONT, (WPARAM)St->FontSmall, TRUE);
+
+            St->PathHwnd = CreateWindowExW(
+                0, L"STATIC", St->FolderPath,
+                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_PATHELLIPSIS,
+                20, 42, 504, 20, Hwnd, (HMENU)IDC_DESC_PATH, NULL, NULL);
+            SendMessageW(St->PathHwnd, WM_SETFONT, (WPARAM)St->FontSmall, TRUE);
 
             St->EditHwnd = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                0, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
-                14, 40, 472, 84, Hwnd, (HMENU)IDC_DESC_EDIT, NULL, NULL);
+                28, 78, 488, 92, Hwnd, (HMENU)IDC_DESC_EDIT, NULL, NULL);
+            SendMessageW(St->EditHwnd, WM_SETFONT, (WPARAM)St->FontUi, TRUE);
+            SendMessageW(St->EditHwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
+            St->OrigEditProc = (WNDPROC)SetWindowLongPtrW(
+                St->EditHwnd, GWLP_WNDPROC, (LONG_PTR)DescEditSubclassProc);
 
             St->StatusHwnd = CreateWindowExW(
-                0, L"STATIC", L"Stored in NTFS Alternate Data Stream (:LiberNT.Description)",
+                0, L"STATIC", L"Saved in NTFS stream (:LiberNT.Description)  \x2022  Ctrl+Enter to save",
                 WS_CHILD | WS_VISIBLE | SS_LEFT,
-                14, 132, 472, 20, Hwnd, (HMENU)IDC_DESC_STATUS, NULL, NULL);
+                20, 186, 504, 20, Hwnd, (HMENU)IDC_DESC_STATUS, NULL, NULL);
+            SendMessageW(St->StatusHwnd, WM_SETFONT, (WPARAM)St->FontSmall, TRUE);
 
-            CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                            14, 160, 86, 28, Hwnd, (HMENU)IDC_DESC_SAVE, NULL, NULL);
-            CreateWindowExW(0, L"BUTTON", L"AI Summarize", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            108, 160, 118, 28, Hwnd, (HMENU)IDC_DESC_AUTO, NULL, NULL);
-            CreateWindowExW(0, L"BUTTON", L"Clear", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            234, 160, 80, 28, Hwnd, (HMENU)IDC_DESC_CLEAR, NULL, NULL);
-            CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            406, 160, 80, 28, Hwnd, (HMENU)IDC_DESC_CLOSE, NULL, NULL);
+            CreateWindowExW(0, L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                            20, 218, 88, 34, Hwnd, (HMENU)IDC_DESC_SAVE, NULL, NULL);
+            CreateWindowExW(0, L"BUTTON", L"AI Summarize", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                            118, 218, 126, 34, Hwnd, (HMENU)IDC_DESC_AUTO, NULL, NULL);
+            CreateWindowExW(0, L"BUTTON", L"Clear", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                            254, 218, 84, 34, Hwnd, (HMENU)IDC_DESC_CLEAR, NULL, NULL);
+            CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                            436, 218, 88, 34, Hwnd, (HMENU)IDC_DESC_CLOSE, NULL, NULL);
 
+            SrcUtf8[0] = '\0';
             if (AiAdsReadFolderDescription(St->FolderPath, DescUtf8, sizeof(DescUtf8),
                                            SrcUtf8, sizeof(SrcUtf8), NULL, 0) == AiStatusOk)
             {
                 Utf8ToWide(DescUtf8, DescW, ARRAYSIZE(DescW));
                 SetWindowTextW(St->EditHwnd, DescW);
+                UpdateDescBadge(St, SrcUtf8[0] ? SrcUtf8 : "user");
             }
+            SetFocus(St->EditHwnd);
             return 0;
         }
+
+        case WM_PAINT:
+        {
+            PAINTSTRUCT Ps;
+            HDC Hdc = BeginPaint(Hwnd, &Ps);
+            RECT Rc;
+
+            GetClientRect(Hwnd, &Rc);
+            if (St != NULL && St->BgBrush != NULL)
+                FillRect(Hdc, &Rc, St->BgBrush);
+            DrawFramedBox(Hdc, 20, 70, 504, 108, AI_COL_SURFACE, AI_COL_BORDER);
+            EndPaint(Hwnd, &Ps);
+            return 0;
+        }
+
+        case WM_DRAWITEM:
+        {
+            const DRAWITEMSTRUCT *Dis = (const DRAWITEMSTRUCT *)LParam;
+            HFONT Font = St ? St->FontUi : NULL;
+            if (Dis->CtlID == IDC_DESC_SAVE)
+                DrawModernButton(Dis, AiBtnPrimary, Font);
+            else if (Dis->CtlID == IDC_DESC_CLEAR)
+                DrawModernButton(Dis, AiBtnDanger, Font);
+            else
+                DrawModernButton(Dis, AiBtnSecondary, Font);
+            return TRUE;
+        }
+
+        case WM_CTLCOLORSTATIC:
+            if (St == NULL)
+                break;
+            SetBkMode((HDC)WParam, OPAQUE);
+            SetBkColor((HDC)WParam, AI_COL_BG);
+            if ((HWND)LParam == St->TitleHwnd)
+                SetTextColor((HDC)WParam, AI_COL_TEXT);
+            else if ((HWND)LParam == St->BadgeHwnd)
+                SetTextColor((HDC)WParam, RGB(120, 180, 255));
+            else
+                SetTextColor((HDC)WParam, AI_COL_MUTED);
+            return (LRESULT)St->BgBrush;
+
+        case WM_CTLCOLOREDIT:
+            if (St == NULL)
+                break;
+            SetTextColor((HDC)WParam, AI_COL_TEXT);
+            SetBkColor((HDC)WParam, AI_COL_SURFACE);
+            return (LRESULT)St->SurfaceBrush;
 
         case WM_COMMAND:
             if (St == NULL)
@@ -830,9 +1166,15 @@ static LRESULT CALLBACK DescEditorWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LP
                     WideToUtf8(DescW, DescUtf8, sizeof(DescUtf8));
                     AiClientConnect(&Port);
                     if (AiClientSetFolderDescription(Port, St->FolderPath, DescUtf8, "user", "") == AiStatusOk)
-                        SetWindowTextW(St->StatusHwnd, L"Saved [user] description to NTFS ADS and index.");
+                    {
+                        UpdateDescBadge(St, "user");
+                        SetWindowTextW(St->StatusHwnd, L"Saved [user] description to NTFS stream and semantic index.");
+                        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, St->FolderPath, NULL);
+                    }
                     else
+                    {
                         SetWindowTextW(St->StatusHwnd, L"Failed to save description.");
+                    }
                     AiClientClose(Port);
                     return 0;
                 }
@@ -843,6 +1185,9 @@ static LRESULT CALLBACK DescEditorWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LP
                     char TagsUtf8[AI_MAX_TAGS_UTF8];
                     char SrcUtf8[AI_MAX_SOURCE_UTF8];
                     WCHAR DescW[AI_MAX_DESC_UTF8];
+
+                    SetWindowTextW(St->StatusHwnd, L"Generating AI folder summary...");
+                    UpdateWindow(Hwnd);
 
                     if (AiClientConnect(&Port) == AiStatusOk)
                     {
@@ -856,7 +1201,9 @@ static LRESULT CALLBACK DescEditorWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LP
                         {
                             Utf8ToWide(DescUtf8, DescW, ARRAYSIZE(DescW));
                             SetWindowTextW(St->EditHwnd, DescW);
-                            SetWindowTextW(St->StatusHwnd, L"Generated [ai] description and updated index.");
+                            UpdateDescBadge(St, "ai");
+                            SetWindowTextW(St->StatusHwnd, L"Generated [ai] description and updated Explorer & index.");
+                            SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, St->FolderPath, NULL);
                         }
                         else
                         {
@@ -872,7 +1219,9 @@ static LRESULT CALLBACK DescEditorWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LP
                     AiClientClearFolderDescription(Port, St->FolderPath);
                     AiClientClose(Port);
                     SetWindowTextW(St->EditHwnd, L"");
+                    UpdateDescBadge(St, "");
                     SetWindowTextW(St->StatusHwnd, L"Cleared NTFS folder description.");
+                    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, St->FolderPath, NULL);
                     return 0;
                 }
                 case IDC_DESC_CLOSE:
@@ -882,6 +1231,19 @@ static LRESULT CALLBACK DescEditorWndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LP
             break;
 
         case WM_DESTROY:
+            if (St != NULL)
+            {
+                if (St->BgBrush)
+                    DeleteObject(St->BgBrush);
+                if (St->SurfaceBrush)
+                    DeleteObject(St->SurfaceBrush);
+                if (St->FontTitle)
+                    DeleteObject(St->FontTitle);
+                if (St->FontUi)
+                    DeleteObject(St->FontUi);
+                if (St->FontSmall)
+                    DeleteObject(St->FontSmall);
+            }
             PostQuitMessage(0);
             return 0;
     }
@@ -895,6 +1257,10 @@ static int RunDescribeEditor(HINSTANCE hInst, PCWSTR FolderPath)
     DESC_EDITOR_STATE State;
     HWND Hwnd;
     MSG Msg;
+    int ScrW = GetSystemMetrics(SM_CXSCREEN);
+    int ScrH = GetSystemMetrics(SM_CYSCREEN);
+    int WinW = 560;
+    int WinH = 304;
 
     memset(&State, 0, sizeof(State));
     GetFullPathNameW(FolderPath, ARRAYSIZE(State.FolderPath), State.FolderPath, NULL);
@@ -904,14 +1270,14 @@ static int RunDescribeEditor(HINSTANCE hInst, PCWSTR FolderPath)
     Wc.lpfnWndProc = DescEditorWndProc;
     Wc.hInstance = hInst;
     Wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    Wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    Wc.hbrBackground = NULL;
     Wc.lpszClassName = AI_DESC_CLASS;
     RegisterClassExW(&Wc);
 
     Hwnd = CreateWindowExW(
         WS_EX_TOPMOST, AI_DESC_CLASS, L"LiberNT Folder Description",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 512, 236,
+        (ScrW - WinW) / 2, (ScrH - WinH) / 2, WinW, WinH,
         NULL, NULL, hInst, &State);
     if (Hwnd == NULL)
         return 1;
@@ -985,7 +1351,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR CmdLine, int ShowCmd
         AI_BAR_CLASS,
         L"LiberNT AI",
         WS_POPUP | WS_BORDER,
-        240, 72, 740, 440,
+        240, 72, 760, 472,
         NULL, NULL, hInst, NULL);
     if (g_MainHwnd == NULL)
     {
