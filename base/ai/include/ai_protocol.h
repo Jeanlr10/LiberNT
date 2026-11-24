@@ -22,6 +22,11 @@
 #define AI_MAX_TAGS_UTF8        128U
 #define AI_MAX_SNIPPET_UTF8     160U
 #define AI_MAX_SEARCH_RESULTS   6U
+#define AI_MAX_PROMPT_UTF8      1024U
+#define AI_MAX_REPLY_UTF8       2400U
+
+#define AI_PROMPT_MODE_ASK      0U
+#define AI_PROMPT_MODE_DO       1U
 
 typedef enum _AI_OPCODE
 {
@@ -32,9 +37,12 @@ typedef enum _AI_OPCODE
     AiOpSetFolderDesc = 5,
     AiOpGetFolderDesc = 6,
     AiOpClearFolderDesc = 7,
+    AiOpAutoDescribe = 8,
+    AiOpGetConfig = 9,
     AiOpSubmitPrompt = 10,
     AiOpApproveAction = 11,
-    AiOpDesktopTool = 12
+    AiOpDesktopTool = 12,
+    AiOpSetConfig = 13
 } AI_OPCODE;
 
 typedef enum _AI_RESULT_CODE
@@ -47,6 +55,13 @@ typedef enum _AI_RESULT_CODE
     AiStatusAccessDenied = 5,
     AiStatusInternal = 6
 } AI_RESULT_CODE;
+
+typedef enum _AI_PROMPT_STATE
+{
+    AiPromptDone = 0,
+    AiPromptPendingApproval = 1,
+    AiPromptError = 2
+} AI_PROMPT_STATE;
 
 typedef struct _AI_STATUS_INFO
 {
@@ -71,6 +86,28 @@ typedef struct _AI_SEARCH_HIT
     char Snippet[AI_MAX_SNIPPET_UTF8];
 } AI_SEARCH_HIT;
 
+typedef struct _AI_PROMPT_RESPONSE
+{
+    uint32_t State;
+    uint32_t ApprovalId;
+    uint32_t ToolTier;
+    uint32_t ToolCallsExecuted;
+    char ToolName[64];
+    char ToolTarget[AI_MAX_PATH_UTF8];
+    char ToolArgs[512];
+    char ReplyText[AI_MAX_REPLY_UTF8];
+} AI_PROMPT_RESPONSE;
+
+typedef struct _AI_CONFIG_DATA
+{
+    uint32_t TimeoutMs;
+    uint32_t HasApiKey;
+    char Endpoint[256];
+    char Model[128];
+    char EmbedModel[128];
+    char ApiKey[256];
+} AI_CONFIG_DATA;
+
 typedef struct _AI_MSG_PAYLOAD
 {
     uint32_t Version;
@@ -91,6 +128,7 @@ typedef struct _AI_MSG_PAYLOAD
         } SearchResp;
         struct
         {
+            uint32_t Force;
             char Path[AI_MAX_PATH_UTF8];
             char Source[AI_MAX_SOURCE_UTF8];
             char Tags[AI_MAX_TAGS_UTF8];
@@ -100,6 +138,18 @@ typedef struct _AI_MSG_PAYLOAD
         {
             uint32_t IndexedCount;
         } IndexResp;
+        struct
+        {
+            uint32_t Mode;
+            char Prompt[AI_MAX_PROMPT_UTF8];
+        } PromptReq;
+        struct
+        {
+            uint32_t ApprovalId;
+            uint32_t Approved;
+        } ApproveReq;
+        AI_PROMPT_RESPONSE PromptResp;
+        AI_CONFIG_DATA Config;
     } Data;
 } AI_MSG_PAYLOAD;
 

@@ -87,6 +87,52 @@ AiClientClearFolderDescription(
 LIBAI_API
 DWORD
 WINAPI
+AiClientAutoDescribeFolder(
+    _In_ HANDLE Port,
+    _In_ PCWSTR FolderPath,
+    _In_ BOOL Force,
+    _Out_ PSTR DescUtf8,
+    _In_ DWORD DescCap,
+    _Out_opt_ PSTR TagsUtf8,
+    _In_ DWORD TagsCap,
+    _Out_opt_ PSTR SourceUtf8,
+    _In_ DWORD SourceCap);
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientSubmitPrompt(
+    _In_ HANDLE Port,
+    _In_ PCSTR PromptUtf8,
+    _In_ DWORD Mode,
+    _Out_ AI_PROMPT_RESPONSE *OutResponse);
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientApproveAction(
+    _In_ HANDLE Port,
+    _In_ DWORD ApprovalId,
+    _In_ BOOL Approved,
+    _Out_ AI_PROMPT_RESPONSE *OutResponse);
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientGetProviderConfig(
+    _In_ HANDLE Port,
+    _Out_ AI_CONFIG_DATA *OutConfig);
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientSetProviderConfig(
+    _In_ HANDLE Port,
+    _In_ const AI_CONFIG_DATA *Config);
+
+LIBAI_API
+DWORD
+WINAPI
 AiAdsWriteFolderDescription(
     _In_ PCWSTR FolderPath,
     _In_ PCSTR DescUtf8,

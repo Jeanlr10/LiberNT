@@ -1,7 +1,7 @@
 /*
  * PROJECT:     LiberNT AI Subsystem
  * LICENSE:     GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
- * PURPOSE:     Session 0 NT service and ALPC broker for LiberNT semantic search and AI subsystem
+ * PURPOSE:     Session 0 NT service, ALPC broker, provider host, and agent runtime
  * COPYRIGHT:   Copyright 2026 LiberNT Contributors
  */
 
@@ -21,9 +21,12 @@
 #include <ndk/obfuncs.h>
 #include <ndk/rtlfuncs.h>
 
+#include "agent.h"
 #include "ai_protocol.h"
+#include "ai_provider.h"
 #include "ai_store.h"
 #include "indexer.h"
+#include "tools_win32.h"
 
 typedef struct _AI_ALPC_PACKET
 {
@@ -48,7 +51,28 @@ static HANDLE g_StopEvent = NULL;
 static HANDLE g_ConnectionPort = NULL;
 static AI_STORE *g_Store = NULL;
 static AI_INDEXER *g_Indexer = NULL;
+static AI_PROVIDER *g_Provider = NULL;
+static AI_AGENT *g_Agent = NULL;
+static AI_WIN32_TOOL_CTX g_ToolCtx;
 static AI_CLIENT_SLOT g_Clients[AI_MAX_CLIENTS];
+
+static VOID CopySafeStr(char *Dst, size_t Cap, const char *Src)
+{
+    size_t Len;
+
+    if (Dst == NULL || Cap == 0)
+        return;
+    if (Src == NULL)
+    {
+        Dst[0] = '\0';
+        return;
+    }
+    Len = strlen(Src);
+    if (Len >= Cap)
+        Len = Cap - 1;
+    memcpy(Dst, Src, Len);
+    Dst[Len] = '\0';
+}
 
 static VOID ReportServiceStatus(DWORD CurrentState, DWORD Win32ExitCode, DWORD WaitHint)
 {
@@ -122,6 +146,19 @@ static VOID CloseAllClients(VOID)
     }
 }
 
+static VOID CopyAgentResultToPayload(const AI_AGENT_RESULT *Src, AI_PROMPT_RESPONSE *Dst)
+{
+    RtlZeroMemory(Dst, sizeof(*Dst));
+    Dst->State = Src->State;
+    Dst->ApprovalId = Src->ApprovalId;
+    Dst->ToolTier = Src->ToolTier;
+    Dst->ToolCallsExecuted = Src->ToolCallsExecuted;
+    CopySafeStr(Dst->ToolName, sizeof(Dst->ToolName), Src->ToolName);
+    CopySafeStr(Dst->ToolTarget, sizeof(Dst->ToolTarget), Src->ToolTarget);
+    CopySafeStr(Dst->ToolArgs, sizeof(Dst->ToolArgs), Src->ToolArgs);
+    CopySafeStr(Dst->ReplyText, sizeof(Dst->ReplyText), Src->ReplyText);
+}
+
 static VOID HandleRequest(const AI_MSG_PAYLOAD *Req, AI_MSG_PAYLOAD *Resp)
 {
     RtlZeroMemory(Resp, sizeof(*Resp));
@@ -167,14 +204,34 @@ static VOID HandleRequest(const AI_MSG_PAYLOAD *Req, AI_MSG_PAYLOAD *Resp)
             uint32_t Limit = Req->Data.SearchReq.MaxResults;
             uint32_t Count = 0;
             CHAR Query[AI_MAX_QUERY_UTF8];
+            AI_STORE_STATS Stats;
+            float QueryVec[AI_MAX_EMBED_DIM];
+            uint32_t QueryDim = 0;
 
             if (Limit == 0 || Limit > AI_MAX_SEARCH_RESULTS)
                 Limit = AI_MAX_SEARCH_RESULTS;
             memcpy(Query, Req->Data.SearchReq.Query, sizeof(Query));
             Query[sizeof(Query) - 1] = '\0';
 
-            if (g_Store == NULL ||
-                AiStoreSearch(g_Store, Query, NULL, 0, Resp->Data.SearchResp.Hits, Limit, &Count) != 0)
+            if (g_Store == NULL)
+            {
+                Resp->Status = AiStatusDbError;
+                break;
+            }
+
+            RtlZeroMemory(&Stats, sizeof(Stats));
+            RtlZeroMemory(QueryVec, sizeof(QueryVec));
+            if (AiStoreGetStats(g_Store, &Stats) == 0 &&
+                Stats.EmbeddingCount > 0 &&
+                g_Provider != NULL &&
+                g_Provider->Vtbl->Embed != NULL)
+            {
+                if (g_Provider->Vtbl->Embed(g_Provider, Query, QueryVec, AI_MAX_EMBED_DIM, &QueryDim) != 0)
+                    QueryDim = 0;
+            }
+
+            if (AiStoreSearch(g_Store, Query, QueryDim ? QueryVec : NULL, QueryDim,
+                              Resp->Data.SearchResp.Hits, Limit, &Count) != 0)
             {
                 Resp->Status = AiStatusDbError;
                 break;
@@ -279,6 +336,132 @@ static VOID HandleRequest(const AI_MSG_PAYLOAD *Req, AI_MSG_PAYLOAD *Resp)
             break;
         }
 
+        case AiOpAutoDescribe:
+        {
+            CHAR Path[AI_MAX_PATH_UTF8];
+            int Rc;
+
+            if (g_Agent == NULL)
+            {
+                Resp->Status = AiStatusInternal;
+                break;
+            }
+            memcpy(Path, Req->Data.FolderDesc.Path, sizeof(Path));
+            Path[sizeof(Path) - 1] = '\0';
+
+            Rc = AiAgentAutoDescribeFolder(
+                g_Agent,
+                Path,
+                Req->Data.FolderDesc.Force ? 1 : 0,
+                Resp->Data.FolderDesc.Description,
+                sizeof(Resp->Data.FolderDesc.Description),
+                Resp->Data.FolderDesc.Tags,
+                sizeof(Resp->Data.FolderDesc.Tags),
+                Resp->Data.FolderDesc.Source,
+                sizeof(Resp->Data.FolderDesc.Source));
+            Resp->Status = (uint32_t)Rc;
+            break;
+        }
+
+        case AiOpSubmitPrompt:
+        {
+            CHAR Prompt[AI_MAX_PROMPT_UTF8];
+            AI_AGENT_RESULT Res;
+            int Rc;
+
+            if (g_Agent == NULL)
+            {
+                Resp->Status = AiStatusInternal;
+                break;
+            }
+            memcpy(Prompt, Req->Data.PromptReq.Prompt, sizeof(Prompt));
+            Prompt[sizeof(Prompt) - 1] = '\0';
+
+            Rc = AiAgentRunPrompt(g_Agent, Prompt, Req->Data.PromptReq.Mode, &Res);
+            Resp->Status = (uint32_t)Rc;
+            if (Rc == AiStatusOk)
+                CopyAgentResultToPayload(&Res, &Resp->Data.PromptResp);
+            break;
+        }
+
+        case AiOpApproveAction:
+        {
+            AI_AGENT_RESULT Res;
+            int Rc;
+
+            if (g_Agent == NULL)
+            {
+                Resp->Status = AiStatusInternal;
+                break;
+            }
+            Rc = AiAgentResolveApproval(
+                g_Agent,
+                Req->Data.ApproveReq.ApprovalId,
+                Req->Data.ApproveReq.Approved ? 1 : 0,
+                &Res);
+            Resp->Status = (uint32_t)Rc;
+            if (Rc == AiStatusOk)
+                CopyAgentResultToPayload(&Res, &Resp->Data.PromptResp);
+            break;
+        }
+
+        case AiOpGetConfig:
+        {
+            AI_PROVIDER_CONFIG Cfg;
+
+            AiProviderLoadConfigFromRegistry(&Cfg);
+            if (g_Provider != NULL && g_Provider->Vtbl->GetConfig != NULL)
+                g_Provider->Vtbl->GetConfig(g_Provider, &Cfg);
+
+            Resp->Data.Config.TimeoutMs = Cfg.TimeoutMs;
+            Resp->Data.Config.HasApiKey = (Cfg.ApiKey[0] != '\0') ? 1 : 0;
+            CopySafeStr(Resp->Data.Config.Endpoint, sizeof(Resp->Data.Config.Endpoint), Cfg.Endpoint);
+            CopySafeStr(Resp->Data.Config.Model, sizeof(Resp->Data.Config.Model), Cfg.Model);
+            CopySafeStr(Resp->Data.Config.EmbedModel, sizeof(Resp->Data.Config.EmbedModel), Cfg.EmbedModel);
+            Resp->Data.Config.ApiKey[0] = '\0';
+            break;
+        }
+
+        case AiOpSetConfig:
+        {
+            AI_PROVIDER_CONFIG Cfg;
+            AI_PROVIDER *NewProv;
+
+            AiProviderLoadConfigFromRegistry(&Cfg);
+            if (Req->Data.Config.Endpoint[0] != '\0')
+                CopySafeStr(Cfg.Endpoint, sizeof(Cfg.Endpoint), Req->Data.Config.Endpoint);
+            if (Req->Data.Config.Model[0] != '\0')
+                CopySafeStr(Cfg.Model, sizeof(Cfg.Model), Req->Data.Config.Model);
+            if (Req->Data.Config.EmbedModel[0] != '\0')
+                CopySafeStr(Cfg.EmbedModel, sizeof(Cfg.EmbedModel), Req->Data.Config.EmbedModel);
+            if (Req->Data.Config.HasApiKey)
+                CopySafeStr(Cfg.ApiKey, sizeof(Cfg.ApiKey), Req->Data.Config.ApiKey);
+            if (Req->Data.Config.TimeoutMs >= 1000 && Req->Data.Config.TimeoutMs <= 120000)
+                Cfg.TimeoutMs = Req->Data.Config.TimeoutMs;
+
+            if (AiProviderSaveConfigToRegistry(&Cfg) != 0)
+            {
+                Resp->Status = AiStatusIoError;
+                break;
+            }
+
+            NewProv = AiProviderCreateOpenAi(&Cfg);
+            if (NewProv == NULL)
+            {
+                Resp->Status = AiStatusInternal;
+                break;
+            }
+            if (g_Agent != NULL)
+                AiAgentSetProvider(g_Agent, NewProv);
+            if (g_Provider != NULL)
+                g_Provider->Vtbl->Destroy(g_Provider);
+            g_Provider = NewProv;
+
+            if (g_Store != NULL)
+                AiStoreLogAudit(g_Store, 1, "set_provider_config", Cfg.Endpoint, "ok", Cfg.Model);
+            break;
+        }
+
         default:
             Resp->Status = AiStatusInvalidArg;
             break;
@@ -321,6 +504,8 @@ static DWORD RunAiServer(BOOL ConsoleMode)
     BYTE AttrBuf[sizeof(ALPC_MESSAGE_ATTRIBUTES) + sizeof(ALPC_CONTEXT_ATTR) + 64];
     PALPC_MESSAGE_ATTRIBUTES RecvAttrs = (PALPC_MESSAGE_ATTRIBUTES)AttrBuf;
     SIZE_T AttrSize = 0;
+    AI_PROVIDER_CONFIG ProvCfg;
+    AI_AGENT_ENV AgentEnv;
 
     EnsureDataDir();
 
@@ -338,12 +523,27 @@ static DWORD RunAiServer(BOOL ConsoleMode)
         return ERROR_GEN_FAILURE;
     }
 
+    AiProviderLoadConfigFromRegistry(&ProvCfg);
+    g_Provider = AiProviderCreateOpenAi(&ProvCfg);
+
+    g_ToolCtx.Store = g_Store;
+    g_ToolCtx.Indexer = g_Indexer;
+    AiWin32BuildAgentEnv(&g_ToolCtx, &AgentEnv);
+    g_Agent = AiAgentCreate(g_Store, g_Provider, &AgentEnv);
+
     Status = CreateAiAlpcPort(&g_ConnectionPort);
     if (!NT_SUCCESS(Status))
     {
         CHAR Dbg[128];
         _snprintf(Dbg, sizeof(Dbg), "aisvc: NtAlpcCreatePort failed: 0x%08lx\n", (unsigned long)Status);
         OutputDebugStringA(Dbg);
+        AiAgentDestroy(g_Agent);
+        g_Agent = NULL;
+        if (g_Provider != NULL)
+        {
+            g_Provider->Vtbl->Destroy(g_Provider);
+            g_Provider = NULL;
+        }
         AiIndexerStop(g_Indexer);
         g_Indexer = NULL;
         AiStoreClose(g_Store);
@@ -449,6 +649,16 @@ static DWORD RunAiServer(BOOL ConsoleMode)
     {
         NtClose(g_ConnectionPort);
         g_ConnectionPort = NULL;
+    }
+    if (g_Agent != NULL)
+    {
+        AiAgentDestroy(g_Agent);
+        g_Agent = NULL;
+    }
+    if (g_Provider != NULL)
+    {
+        g_Provider->Vtbl->Destroy(g_Provider);
+        g_Provider = NULL;
     }
     if (g_Indexer != NULL)
     {

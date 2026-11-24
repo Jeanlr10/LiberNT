@@ -1,7 +1,7 @@
 /*
  * PROJECT:     LiberNT AI Subsystem
  * LICENSE:     GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
- * PURPOSE:     Command-line interface (ai.exe) for semantic NTFS search, service status, and folder descriptions
+ * PURPOSE:     Command-line interface (ai.exe) for semantic search, folder descriptions, and OS agent
  * COPYRIGHT:   Copyright 2026 LiberNT Contributors
  */
 
@@ -19,14 +19,31 @@
 
 static void PrintUsage(void)
 {
-    printf("LiberNT AI CLI (Milestone 1)\n");
+    printf("LiberNT AI CLI (Milestone 2)\n");
     printf("Usage:\n");
-    printf("  ai status                              Show aisvc health and index statistics\n");
-    printf("  ai index                               Run an immediate incremental NTFS crawl\n");
-    printf("  ai search <query...>                   Search files, contents, and folder descriptions\n");
-    printf("  ai describe <folder>                   Show a folder's description\n");
-    printf("  ai describe <folder> <text...>         Set a folder's user-visible NTFS description\n");
-    printf("  ai describe --clear <folder>           Clear a folder's NTFS description\n");
+    printf("  ai status                                         Show aisvc health and index statistics\n");
+    printf("  ai index                                          Run an immediate incremental NTFS crawl\n");
+    printf("  ai search <query...>                              Search files, contents, and folder descriptions\n");
+    printf("  ai describe <folder>                              Show a folder's description\n");
+    printf("  ai describe <folder> <text...>                    Set a folder's user-visible NTFS description\n");
+    printf("  ai describe --clear <folder>                      Clear a folder's NTFS description\n");
+    printf("  ai describe --auto [--force] <folder>             AI-generate a folder description from contents\n");
+    printf("  ai ask <question...>                              Read-only grounded OS Q&A (Tier 0 tools only)\n");
+    printf("  ai do [--yes|--deny] <instruction...>             Agent action mode with Tier 2 approval gate\n");
+    printf("  ai config                                         Show active LLM provider configuration\n");
+    printf("  ai config set [--endpoint U] [--model M] [--embed-model E] [--api-key K]\n");
+}
+
+static BOOL WideArgToUtf8(PCWSTR Wide, char *Out, DWORD Cap)
+{
+    if (Wide == NULL || Out == NULL || Cap == 0)
+        return FALSE;
+    if (WideCharToMultiByte(CP_UTF8, 0, Wide, -1, Out, (int)Cap, NULL, NULL) <= 0)
+    {
+        Out[0] = '\0';
+        return FALSE;
+    }
+    return TRUE;
 }
 
 static BOOL JoinArgsUtf8(int Argc, wchar_t **Argv, int StartIdx, char *Out, DWORD Cap)
@@ -197,6 +214,58 @@ static int CmdDescribe(int Argc, wchar_t **Argv)
         return 0;
     }
 
+    if (_wcsicmp(Argv[2], L"--auto") == 0)
+    {
+        BOOL Force = FALSE;
+        PCWSTR Folder = NULL;
+        char Desc[AI_MAX_DESC_UTF8];
+        char Tags[AI_MAX_TAGS_UTF8];
+        char Source[AI_MAX_SOURCE_UTF8];
+
+        if (Port == NULL)
+        {
+            fprintf(stderr, "ai: aisvc connection required for --auto\n");
+            return 1;
+        }
+        if (Argc >= 5 && _wcsicmp(Argv[3], L"--force") == 0)
+        {
+            Force = TRUE;
+            Folder = Argv[4];
+        }
+        else if (Argc >= 4)
+        {
+            Folder = Argv[3];
+        }
+        else
+        {
+            AiClientClose(Port);
+            PrintUsage();
+            return 1;
+        }
+
+        Res = AiClientAutoDescribeFolder(
+            Port, Folder, Force,
+            Desc, sizeof(Desc),
+            Tags, sizeof(Tags),
+            Source, sizeof(Source));
+        AiClientClose(Port);
+        if (Res == AiStatusAccessDenied)
+        {
+            printf("pinned [user]: %s (pass --force to overwrite)\n", Desc);
+            return 0;
+        }
+        if (Res != AiStatusOk)
+        {
+            fprintf(stderr, "ai: auto-describe failed (err=%lu)\n", (unsigned long)Res);
+            return 1;
+        }
+        printf("[%s] %s", Source[0] ? Source : "ai", Desc);
+        if (Tags[0] != '\0')
+            printf("  (tags: %s)", Tags);
+        printf("\n");
+        return 0;
+    }
+
     if (Argc == 3)
     {
         char Desc[AI_MAX_DESC_UTF8];
@@ -234,6 +303,160 @@ static int CmdDescribe(int Argc, wchar_t **Argv)
     }
 }
 
+static int CmdPrompt(int Argc, wchar_t **Argv, DWORD Mode)
+{
+    int StartIdx = 2;
+    int AutoDecision = 0; /* 0 = interactive prompt, 1 = --yes, -1 = --deny */
+    char Prompt[AI_MAX_PROMPT_UTF8];
+    AI_PROMPT_RESPONSE Resp;
+    HANDLE Port = NULL;
+    DWORD Res;
+
+    while (StartIdx < Argc)
+    {
+        if (_wcsicmp(Argv[StartIdx], L"--yes") == 0 || _wcsicmp(Argv[StartIdx], L"-y") == 0)
+        {
+            AutoDecision = 1;
+            StartIdx++;
+        }
+        else if (_wcsicmp(Argv[StartIdx], L"--deny") == 0)
+        {
+            AutoDecision = -1;
+            StartIdx++;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (!JoinArgsUtf8(Argc, Argv, StartIdx, Prompt, sizeof(Prompt)))
+    {
+        PrintUsage();
+        return 1;
+    }
+
+    Res = AiClientConnect(&Port);
+    if (Res != AiStatusOk)
+    {
+        fprintf(stderr, "ai: failed to connect to aisvc ALPC port (err=%lu)\n", (unsigned long)Res);
+        return 1;
+    }
+
+    Res = AiClientSubmitPrompt(Port, Prompt, Mode, &Resp);
+    while (Res == AiStatusOk && Resp.State == AiPromptPendingApproval)
+    {
+        BOOL Approve = FALSE;
+
+        printf("[APPROVAL REQUIRED] id=%u tier=%u tool=%s target=%s\n",
+               Resp.ApprovalId, Resp.ToolTier, Resp.ToolName,
+               Resp.ToolTarget[0] ? Resp.ToolTarget : "(none)");
+        printf("  args: %s\n", Resp.ToolArgs);
+
+        if (AutoDecision == 1)
+        {
+            printf("  decision: approved (--yes)\n");
+            Approve = TRUE;
+        }
+        else if (AutoDecision == -1)
+        {
+            printf("  decision: denied (--deny)\n");
+            Approve = FALSE;
+        }
+        else
+        {
+            char Line[32];
+            printf("Approve this Tier %u action? [y/N]: ", Resp.ToolTier);
+            fflush(stdout);
+            if (fgets(Line, sizeof(Line), stdin) != NULL && (Line[0] == 'y' || Line[0] == 'Y'))
+                Approve = TRUE;
+        }
+
+        Res = AiClientApproveAction(Port, Resp.ApprovalId, Approve, &Resp);
+    }
+
+    AiClientClose(Port);
+
+    if (Res != AiStatusOk)
+    {
+        fprintf(stderr, "ai: agent request failed (err=%lu)\n", (unsigned long)Res);
+        return 1;
+    }
+
+    if (Resp.State == AiPromptError)
+    {
+        printf("error: %s\n", Resp.ReplyText);
+        return 1;
+    }
+
+    printf("%s\n", Resp.ReplyText);
+    if (Resp.ToolCallsExecuted > 0)
+        printf("[tools_executed=%u]\n", Resp.ToolCallsExecuted);
+    return 0;
+}
+
+static int CmdConfig(int Argc, wchar_t **Argv)
+{
+    HANDLE Port = NULL;
+    AI_CONFIG_DATA Cfg;
+    DWORD Res;
+
+    Res = AiClientConnect(&Port);
+    if (Res != AiStatusOk)
+    {
+        fprintf(stderr, "ai: failed to connect to aisvc ALPC port (err=%lu)\n", (unsigned long)Res);
+        return 1;
+    }
+
+    if (Argc >= 3 && _wcsicmp(Argv[2], L"set") == 0)
+    {
+        int i;
+
+        memset(&Cfg, 0, sizeof(Cfg));
+        for (i = 3; i + 1 < Argc; i += 2)
+        {
+            if (_wcsicmp(Argv[i], L"--endpoint") == 0)
+                WideArgToUtf8(Argv[i + 1], Cfg.Endpoint, sizeof(Cfg.Endpoint));
+            else if (_wcsicmp(Argv[i], L"--model") == 0)
+                WideArgToUtf8(Argv[i + 1], Cfg.Model, sizeof(Cfg.Model));
+            else if (_wcsicmp(Argv[i], L"--embed-model") == 0)
+                WideArgToUtf8(Argv[i + 1], Cfg.EmbedModel, sizeof(Cfg.EmbedModel));
+            else if (_wcsicmp(Argv[i], L"--api-key") == 0)
+            {
+                WideArgToUtf8(Argv[i + 1], Cfg.ApiKey, sizeof(Cfg.ApiKey));
+                Cfg.HasApiKey = 1;
+            }
+            else if (_wcsicmp(Argv[i], L"--timeout") == 0)
+                Cfg.TimeoutMs = (uint32_t)_wtol(Argv[i + 1]);
+        }
+
+        Res = AiClientSetProviderConfig(Port, &Cfg);
+        AiClientClose(Port);
+        if (Res != AiStatusOk)
+        {
+            fprintf(stderr, "ai: failed to update provider config (err=%lu)\n", (unsigned long)Res);
+            return 1;
+        }
+        printf("provider config updated\n");
+        return 0;
+    }
+
+    Res = AiClientGetProviderConfig(Port, &Cfg);
+    AiClientClose(Port);
+    if (Res != AiStatusOk)
+    {
+        fprintf(stderr, "ai: failed to query provider config (err=%lu)\n", (unsigned long)Res);
+        return 1;
+    }
+
+    printf("endpoint: %s\n", Cfg.Endpoint);
+    printf("model: %s\n", Cfg.Model);
+    printf("embed_model: %s\n", Cfg.EmbedModel);
+    printf("api_key: %s\n", Cfg.HasApiKey ? "(configured)" : "(none)");
+    printf("timeout_ms: %u\n", Cfg.TimeoutMs);
+    return 0;
+}
+
 int wmain(int argc, wchar_t **argv)
 {
     if (argc < 2)
@@ -250,6 +473,12 @@ int wmain(int argc, wchar_t **argv)
         return CmdSearch(argc, argv);
     if (_wcsicmp(argv[1], L"describe") == 0)
         return CmdDescribe(argc, argv);
+    if (_wcsicmp(argv[1], L"ask") == 0)
+        return CmdPrompt(argc, argv, AI_PROMPT_MODE_ASK);
+    if (_wcsicmp(argv[1], L"do") == 0)
+        return CmdPrompt(argc, argv, AI_PROMPT_MODE_DO);
+    if (_wcsicmp(argv[1], L"config") == 0)
+        return CmdConfig(argc, argv);
 
     PrintUsage();
     return 1;

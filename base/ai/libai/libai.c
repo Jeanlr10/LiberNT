@@ -199,7 +199,7 @@ static DWORD SendAlpcRequest(HANDLE Port, const AI_MSG_PAYLOAD *Req, AI_MSG_PAYL
     SendPkt.Payload.Version = AI_PROTOCOL_VERSION;
 
     RecvLen = sizeof(RecvPkt);
-    Timeout.QuadPart = -(LONGLONG)15000 * 10000;
+    Timeout.QuadPart = -(LONGLONG)60000 * 10000;
     Status = NtAlpcSendWaitReceivePort(
         Port,
         ALPC_MSGFLG_SYNC_REQUEST,
@@ -637,6 +637,146 @@ AiClientClearFolderDescription(
     Req.Opcode = AiOpClearFolderDesc;
     WideToUtf8(FullPath, Req.Data.FolderDesc.Path, sizeof(Req.Data.FolderDesc.Path));
 
+    return SendAlpcRequest(Port, &Req, &Resp);
+}
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientAutoDescribeFolder(
+    _In_ HANDLE Port,
+    _In_ PCWSTR FolderPath,
+    _In_ BOOL Force,
+    _Out_ PSTR DescUtf8,
+    _In_ DWORD DescCap,
+    _Out_opt_ PSTR TagsUtf8,
+    _In_ DWORD TagsCap,
+    _Out_opt_ PSTR SourceUtf8,
+    _In_ DWORD SourceCap)
+{
+    WCHAR FullPath[MAX_PATH];
+    AI_MSG_PAYLOAD Req;
+    AI_MSG_PAYLOAD Resp;
+    DWORD Result;
+
+    if (Port == NULL || FolderPath == NULL || DescUtf8 == NULL || DescCap == 0)
+        return AiStatusInvalidArg;
+
+    DescUtf8[0] = '\0';
+    CopySafeStr(TagsUtf8, TagsCap, "");
+    CopySafeStr(SourceUtf8, SourceCap, "");
+
+    if (!NormalizeFolderPath(FolderPath, FullPath, ARRAYSIZE(FullPath)))
+        return AiStatusInvalidArg;
+
+    RtlZeroMemory(&Req, sizeof(Req));
+    Req.Opcode = AiOpAutoDescribe;
+    Req.Data.FolderDesc.Force = Force ? 1 : 0;
+    WideToUtf8(FullPath, Req.Data.FolderDesc.Path, sizeof(Req.Data.FolderDesc.Path));
+
+    Result = SendAlpcRequest(Port, &Req, &Resp);
+    CopySafeStr(DescUtf8, DescCap, Resp.Data.FolderDesc.Description);
+    CopySafeStr(TagsUtf8, TagsCap, Resp.Data.FolderDesc.Tags);
+    CopySafeStr(SourceUtf8, SourceCap, Resp.Data.FolderDesc.Source);
+    return Result;
+}
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientSubmitPrompt(
+    _In_ HANDLE Port,
+    _In_ PCSTR PromptUtf8,
+    _In_ DWORD Mode,
+    _Out_ AI_PROMPT_RESPONSE *OutResponse)
+{
+    AI_MSG_PAYLOAD Req;
+    AI_MSG_PAYLOAD Resp;
+    DWORD Result;
+
+    if (Port == NULL || PromptUtf8 == NULL || OutResponse == NULL)
+        return AiStatusInvalidArg;
+
+    RtlZeroMemory(OutResponse, sizeof(*OutResponse));
+    RtlZeroMemory(&Req, sizeof(Req));
+    Req.Opcode = AiOpSubmitPrompt;
+    Req.Data.PromptReq.Mode = Mode;
+    CopySafeStr(Req.Data.PromptReq.Prompt, sizeof(Req.Data.PromptReq.Prompt), PromptUtf8);
+
+    Result = SendAlpcRequest(Port, &Req, &Resp);
+    if (Result == AiStatusOk)
+        *OutResponse = Resp.Data.PromptResp;
+    return Result;
+}
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientApproveAction(
+    _In_ HANDLE Port,
+    _In_ DWORD ApprovalId,
+    _In_ BOOL Approved,
+    _Out_ AI_PROMPT_RESPONSE *OutResponse)
+{
+    AI_MSG_PAYLOAD Req;
+    AI_MSG_PAYLOAD Resp;
+    DWORD Result;
+
+    if (Port == NULL || OutResponse == NULL || ApprovalId == 0)
+        return AiStatusInvalidArg;
+
+    RtlZeroMemory(OutResponse, sizeof(*OutResponse));
+    RtlZeroMemory(&Req, sizeof(Req));
+    Req.Opcode = AiOpApproveAction;
+    Req.Data.ApproveReq.ApprovalId = ApprovalId;
+    Req.Data.ApproveReq.Approved = Approved ? 1 : 0;
+
+    Result = SendAlpcRequest(Port, &Req, &Resp);
+    if (Result == AiStatusOk)
+        *OutResponse = Resp.Data.PromptResp;
+    return Result;
+}
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientGetProviderConfig(
+    _In_ HANDLE Port,
+    _Out_ AI_CONFIG_DATA *OutConfig)
+{
+    AI_MSG_PAYLOAD Req;
+    AI_MSG_PAYLOAD Resp;
+    DWORD Result;
+
+    if (Port == NULL || OutConfig == NULL)
+        return AiStatusInvalidArg;
+
+    RtlZeroMemory(OutConfig, sizeof(*OutConfig));
+    RtlZeroMemory(&Req, sizeof(Req));
+    Req.Opcode = AiOpGetConfig;
+
+    Result = SendAlpcRequest(Port, &Req, &Resp);
+    if (Result == AiStatusOk)
+        *OutConfig = Resp.Data.Config;
+    return Result;
+}
+
+LIBAI_API
+DWORD
+WINAPI
+AiClientSetProviderConfig(
+    _In_ HANDLE Port,
+    _In_ const AI_CONFIG_DATA *Config)
+{
+    AI_MSG_PAYLOAD Req;
+    AI_MSG_PAYLOAD Resp;
+
+    if (Port == NULL || Config == NULL)
+        return AiStatusInvalidArg;
+
+    RtlZeroMemory(&Req, sizeof(Req));
+    Req.Opcode = AiOpSetConfig;
+    Req.Data.Config = *Config;
     return SendAlpcRequest(Port, &Req, &Resp);
 }
 
