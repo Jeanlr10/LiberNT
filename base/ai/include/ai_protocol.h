@@ -11,6 +11,7 @@
 
 #define AI_PROTOCOL_VERSION     1U
 #define AI_PORT_NAME            L"\\RPC Control\\LiberNtAiPort"
+#define AI_DESKTOP_PORT_NAME    L"\\RPC Control\\LiberNtAiDesktopPort"
 #define AI_DESC_STREAM_SUFFIX   L":LiberNT.Description"
 #define AI_SERVICE_NAME         L"AiSvc"
 #define AI_REG_KEY              L"SOFTWARE\\LiberNT\\AI"
@@ -150,6 +151,12 @@ typedef struct _AI_MSG_PAYLOAD
         } ApproveReq;
         AI_PROMPT_RESPONSE PromptResp;
         AI_CONFIG_DATA Config;
+        struct
+        {
+            char ToolName[64];
+            char ArgsJson[512];
+            char ResultJson[AI_MAX_REPLY_UTF8];
+        } DesktopTool;
     } Data;
 } AI_MSG_PAYLOAD;
 

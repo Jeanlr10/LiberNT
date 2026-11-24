@@ -472,6 +472,21 @@ static int ExecuteTool(
         return 0;
     }
 
+    if (strcmp(Call->Name, "list_windows") == 0 ||
+        strcmp(Call->Name, "inspect_window") == 0 ||
+        strcmp(Call->Name, "focus_window") == 0 ||
+        strcmp(Call->Name, "arrange_windows") == 0 ||
+        strcmp(Call->Name, "launch_app") == 0 ||
+        strcmp(Call->Name, "close_window") == 0)
+    {
+        if (Agent->Env.DesktopTool == NULL)
+        {
+            CopyStrSafe(OutBuf, OutCap, "{\"error\":\"desktop shell (aishell.exe) is not running\"}");
+            return -1;
+        }
+        return Agent->Env.DesktopTool(Agent->Env.UserCtx, Call->Name, Args, OutBuf, OutCap);
+    }
+
     CopyStrSafe(OutBuf, OutCap, "{\"error\":\"unknown tool\"}");
     return -1;
 }

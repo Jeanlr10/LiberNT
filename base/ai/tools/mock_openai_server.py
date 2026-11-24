@@ -123,6 +123,98 @@ def handle_chat(body: dict):
             ]
         }
 
+    # 4b. First turn: Desktop window orchestration tools
+    if "list_windows" in tool_names and "list windows" in prompt_low:
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_listwin_1",
+                                "type": "function",
+                                "function": {"name": "list_windows", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+    if "inspect_window" in tool_names and "inspect" in prompt_low:
+        target = prompt.split("inspect", 1)[1].strip() or "Notepad"
+        args = json.dumps({"target": target})
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_inspect_1",
+                                "type": "function",
+                                "function": {"name": "inspect_window", "arguments": args},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+    if "arrange_windows" in tool_names and any(k in prompt_low for k in ("tile", "split", "undo layout", "arrange")):
+        if "undo" in prompt_low:
+            args = json.dumps({"layout": "undo"})
+        elif "horizontal" in prompt_low:
+            args = json.dumps({"layout": "split_horizontal", "targets": "Notepad,Command Prompt"})
+        else:
+            targets = "Notepad,Command Prompt" if ("notepad" in prompt_low and "cmd" in prompt_low) else ""
+            args = json.dumps({"layout": "split_vertical", "targets": targets})
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_arrange_1",
+                                "type": "function",
+                                "function": {"name": "arrange_windows", "arguments": args},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+    if "close_window" in tool_names and "close window" in prompt_low:
+        target = prompt.split("close window", 1)[1].strip() or "Notepad"
+        args = json.dumps({"target": target})
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_close_1",
+                                "type": "function",
+                                "function": {"name": "close_window", "arguments": args},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
     # 5. First turn: search_files for file/note/tax/fiscal questions
     if "search_files" in tool_names and any(
         k in prompt_low for k in ("find", "search", "tax", "fiscal", "plan", "note", "where")

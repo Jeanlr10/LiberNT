@@ -286,10 +286,15 @@ static void TestPolicyAndAgent(void)
     char Source[32];
 
     CHECK(AiPolicyEvaluate("search_files", 1, 0) == AiPolicyAllow, "Tier 0 allowed in ask mode");
+    CHECK(AiPolicyEvaluate("list_windows", 1, 0) == AiPolicyAllow, "Desktop Tier 0 list_windows allowed in ask mode");
+    CHECK(AiPolicyEvaluate("inspect_window", 1, 0) == AiPolicyAllow, "Desktop Tier 0 inspect_window allowed in ask mode");
     CHECK(AiPolicyEvaluate("set_folder_description", 1, 0) == AiPolicyDeny, "Tier 1 denied in ask mode");
+    CHECK(AiPolicyEvaluate("arrange_windows", 1, 0) == AiPolicyDeny, "Desktop Tier 1 arrange_windows denied in ask mode");
+    CHECK(AiPolicyEvaluate("arrange_windows", 0, 0) == AiPolicyAllow, "Desktop Tier 1 arrange_windows allowed in do mode");
     CHECK(AiPolicyEvaluate("set_folder_description", 0, 0) == AiPolicyAllow, "Tier 1 allowed in do mode");
     CHECK(AiPolicyEvaluate("write_file", 1, 0) == AiPolicyDeny, "Tier 2 denied in ask mode");
     CHECK(AiPolicyEvaluate("write_file", 0, 0) == AiPolicyNeedApproval, "Tier 2 requires approval in do mode");
+    CHECK(AiPolicyEvaluate("close_window", 0, 0) == AiPolicyNeedApproval, "Desktop Tier 2 close_window requires approval in do mode");
     CHECK(AiPolicyEvaluate("unknown_tool", 0, 0) == AiPolicyDeny, "unknown tool denied");
 
     CHECK(AiStoreOpen(":memory:", &Store) == 0, "open in-memory SQLite store");

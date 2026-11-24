@@ -66,6 +66,13 @@ typedef struct _AI_AGENT_ENV
         void *UserCtx,
         char *OutBuf,
         size_t OutCap);
+
+    int (*DesktopTool)(
+        void *UserCtx,
+        const char *ToolName,
+        const char *ArgsJson,
+        char *OutJson,
+        size_t OutCap);
 } AI_AGENT_ENV;
 
 typedef struct _AI_AGENT AI_AGENT;

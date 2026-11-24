@@ -59,6 +59,144 @@ static void GetItemDescription(PCUITEMID_CHILD pidl, LPWSTR Buf, UINT cchMax)
         Buf[0] = UNICODE_NULL;
 }
 
+static BOOL ReadFolderDescriptionFromAdsOrIni(LPCWSTR pszFolderPath, LPWSTR pszOut, UINT cchOut)
+{
+    WCHAR szAdsPath[MAX_PATH + 64];
+    CHAR szRaw[1536];
+    CHAR szText[512];
+    HANDLE hFile;
+    DWORD cbRead = 0;
+    size_t cchPath;
+
+    if (!pszFolderPath || !pszOut || cchOut < 2)
+        return FALSE;
+    pszOut[0] = UNICODE_NULL;
+
+    cchPath = wcslen(pszFolderPath);
+    while (cchPath > 3 && (pszFolderPath[cchPath - 1] == L'\\' || pszFolderPath[cchPath - 1] == L'/'))
+        cchPath--;
+    if (cchPath == 0 || cchPath + 24 >= _countof(szAdsPath))
+        return FALSE;
+
+    memcpy(szAdsPath, pszFolderPath, cchPath * sizeof(WCHAR));
+    wcscpy(szAdsPath + cchPath, L":LiberNT.Description");
+
+    hFile = CreateFileW(szAdsPath,
+                        GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL,
+                        OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS,
+                        NULL);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        BOOL bOk = ReadFile(hFile, szRaw, sizeof(szRaw) - 1, &cbRead, NULL);
+        CloseHandle(hFile);
+        if (bOk && cbRead > 0)
+        {
+            szRaw[cbRead] = '\0';
+            const char *pFound = strstr(szRaw, "\"text\":\"");
+            if (pFound)
+            {
+                const char *p = pFound + 8;
+                size_t outPos = 0;
+                while (*p && *p != '"' && outPos + 1 < sizeof(szText))
+                {
+                    if (*p == '\\' && p[1])
+                    {
+                        p++;
+                        if (*p == 'n') szText[outPos++] = '\n';
+                        else if (*p == 'r') szText[outPos++] = '\r';
+                        else if (*p == 't') szText[outPos++] = '\t';
+                        else szText[outPos++] = *p;
+                    }
+                    else
+                    {
+                        szText[outPos++] = *p;
+                    }
+                    p++;
+                }
+                szText[outPos] = '\0';
+            }
+            else
+            {
+                strncpy(szText, szRaw, sizeof(szText) - 1);
+                szText[sizeof(szText) - 1] = '\0';
+            }
+
+            if (szText[0] != '\0' &&
+                MultiByteToWideChar(CP_UTF8, 0, szText, -1, pszOut, (int)cchOut) > 0)
+            {
+                return TRUE;
+            }
+        }
+    }
+
+    if (cchPath + 13 < _countof(szAdsPath))
+    {
+        memcpy(szAdsPath, pszFolderPath, cchPath * sizeof(WCHAR));
+        wcscpy(szAdsPath + cchPath, L"\\desktop.ini");
+        if (GetPrivateProfileStringW(L".ShellClassInfo", L"InfoTip", L"", pszOut, cchOut, szAdsPath) > 0)
+            return TRUE;
+    }
+
+    pszOut[0] = UNICODE_NULL;
+    return FALSE;
+}
+
+class CFSFolderQueryInfo :
+    public CComObjectRootEx<CComMultiThreadModelNoCS>,
+    public IQueryInfo
+{
+    WCHAR m_szFolderPath[MAX_PATH];
+
+public:
+    CFSFolderQueryInfo()
+    {
+        m_szFolderPath[0] = UNICODE_NULL;
+    }
+
+    HRESULT Initialize(LPCWSTR pszFolderPath)
+    {
+        if (!pszFolderPath)
+            return E_INVALIDARG;
+        lstrcpynW(m_szFolderPath, pszFolderPath, _countof(m_szFolderPath));
+        return S_OK;
+    }
+
+    STDMETHOD(GetInfoTip)(DWORD dwFlags, PWSTR *ppwszTip) override
+    {
+        WCHAR szTip[512];
+        UNREFERENCED_PARAMETER(dwFlags);
+        if (!ppwszTip)
+            return E_POINTER;
+        *ppwszTip = NULL;
+        if (!ReadFolderDescriptionFromAdsOrIni(m_szFolderPath, szTip, _countof(szTip)))
+            return S_OK;
+        return SHStrDupW(szTip, ppwszTip);
+    }
+
+    STDMETHOD(GetInfoFlags)(DWORD *pdwFlags) override
+    {
+        if (!pdwFlags)
+            return E_POINTER;
+        *pdwFlags = 0;
+        return S_OK;
+    }
+
+    DECLARE_NOT_AGGREGATABLE(CFSFolderQueryInfo)
+    DECLARE_PROTECT_FINAL_CONSTRUCT()
+
+    BEGIN_COM_MAP(CFSFolderQueryInfo)
+        COM_INTERFACE_ENTRY_IID(IID_IQueryInfo, IQueryInfo)
+    END_COM_MAP()
+};
+
+static HRESULT CFSFolderQueryInfo_CreateInstance(LPCWSTR pszFolderPath, REFIID riid, LPVOID *ppv)
+{
+    return ShellObjectCreatorInit<CFSFolderQueryInfo>(pszFolderPath, riid, ppv);
+}
+
 static HKEY OpenKeyFromFileType(LPCWSTR pExtension, LPCWSTR KeyName)
 {
     HKEY hkey;
@@ -1654,6 +1792,20 @@ HRESULT WINAPI CFSFolder::GetUIObjectOf(HWND hwndOwner,
                 hr = CFSDropTarget_CreateInstance(m_sPathTarget, riid, (LPVOID*) &pObj);
             }
         }
+        else if (IsEqualIID (riid, IID_IQueryInfo) && (cidl == 1) && ItemIsFolder(apidl[0]))
+        {
+            STRRET sr;
+            WCHAR szPath[MAX_PATH];
+            if (SUCCEEDED(GetDisplayNameOf(apidl[0], SHGDN_FORPARSING, &sr)) &&
+                SUCCEEDED(StrRetToBufW(&sr, apidl[0], szPath, _countof(szPath))))
+            {
+                hr = CFSFolderQueryInfo_CreateInstance(szPath, riid, &pObj);
+            }
+            else
+            {
+                hr = E_FAIL;
+            }
+        }
         else
             hr = E_NOINTERFACE;
 
@@ -2034,7 +2186,17 @@ HRESULT WINAPI CFSFolder::GetDetailsOf(PCUITEMID_CHILD pidl,
                 _ILGetFileAttributes(pidl, psd->str.pOleStr, MAX_PATH);
                 break;
             case SHFSF_COL_COMMENT:
-                psd->str.pOleStr[0] = UNICODE_NULL; // TODO: Extract comment from .lnk files? desktop.ini?
+                psd->str.pOleStr[0] = UNICODE_NULL;
+                if (ItemIsFolder(pidl))
+                {
+                    STRRET sr;
+                    WCHAR szPath[MAX_PATH];
+                    if (SUCCEEDED(GetDisplayNameOf(pidl, SHGDN_FORPARSING, &sr)) &&
+                        SUCCEEDED(StrRetToBufW(&sr, pidl, szPath, _countof(szPath))))
+                    {
+                        ReadFolderDescriptionFromAdsOrIni(szPath, psd->str.pOleStr, MAX_PATH);
+                    }
+                }
                 break;
 #if DBG
             default:

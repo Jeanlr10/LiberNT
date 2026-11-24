@@ -48,5 +48,15 @@ add_registry_inf(aisvc/aisvc_reg.inf)
 # ai.exe - Command-line interface for semantic search, folder descriptions, and OS agent
 add_executable(ai ai_cli/main.c)
 set_module_type(ai win32cui UNICODE)
-add_importlibs(ai libai msvcrt kernel32 ntdll)
+target_link_libraries(ai uuid)
+add_importlibs(ai libai shell32 shlwapi ole32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET ai DESTINATION reactos/system32 FOR all)
+
+# aishell.exe - Session 1 floating Win+Space DWM command bar, desktop ALPC bridge & folder editor
+add_executable(aishell
+    aishell/main.c
+    aishell/desktop_orch.c
+    provider/ai_json.c)
+set_module_type(aishell win32gui UNICODE)
+add_importlibs(aishell libai dwmapi shell32 gdi32 user32 advapi32 msvcrt kernel32 ntdll)
+add_cd_file(TARGET aishell DESTINATION reactos/system32 FOR all)

@@ -14,6 +14,9 @@
 #include <windef.h>
 #include <winbase.h>
 #include <winnls.h>
+#include <objbase.h>
+#include <shlobj.h>
+#include <shlwapi.h>
 
 #include "libai.h"
 
@@ -457,6 +460,77 @@ static int CmdConfig(int Argc, wchar_t **Argv)
     return 0;
 }
 
+static int CmdShellTip(int Argc, wchar_t **Argv)
+{
+    WCHAR FullPath[MAX_PATH];
+    PIDLIST_ABSOLUTE Pidl = NULL;
+    IShellFolder2 *Folder = NULL;
+    PCUITEMID_CHILD Child = NULL;
+    IQueryInfo *QueryInfo = NULL;
+    SHELLDETAILS Details;
+    PWSTR TipW = NULL;
+    WCHAR ColW[MAX_PATH];
+    char TipUtf8[512];
+    char ColUtf8[512];
+    HRESULT Hr;
+
+    if (Argc < 3)
+    {
+        PrintUsage();
+        return 1;
+    }
+
+    if (GetFullPathNameW(Argv[2], ARRAYSIZE(FullPath), FullPath, NULL) == 0)
+        return 1;
+
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    Hr = SHParseDisplayName(FullPath, NULL, &Pidl, 0, NULL);
+    if (FAILED(Hr) || Pidl == NULL)
+    {
+        fprintf(stderr, "ai: SHParseDisplayName failed (0x%08lx)\n", (unsigned long)Hr);
+        CoUninitialize();
+        return 1;
+    }
+
+    Hr = SHBindToParent(Pidl, &IID_IShellFolder2, (void **)&Folder, &Child);
+    if (SUCCEEDED(Hr) && Folder != NULL)
+    {
+        ColUtf8[0] = '\0';
+        TipUtf8[0] = '\0';
+
+        memset(&Details, 0, sizeof(Details));
+        if (SUCCEEDED(Folder->lpVtbl->GetDetailsOf(Folder, Child, 5, &Details)))
+        {
+            ColW[0] = UNICODE_NULL;
+            StrRetToBufW(&Details.str, Child, ColW, ARRAYSIZE(ColW));
+            WideArgToUtf8(ColW, ColUtf8, sizeof(ColUtf8));
+        }
+
+        if (SUCCEEDED(Folder->lpVtbl->GetUIObjectOf(Folder, NULL, 1, &Child, &IID_IQueryInfo, NULL, (void **)&QueryInfo)) &&
+            QueryInfo != NULL)
+        {
+            if (SUCCEEDED(QueryInfo->lpVtbl->GetInfoTip(QueryInfo, 0, &TipW)) && TipW != NULL)
+            {
+                WideArgToUtf8(TipW, TipUtf8, sizeof(TipUtf8));
+                CoTaskMemFree(TipW);
+            }
+            QueryInfo->lpVtbl->Release(QueryInfo);
+        }
+
+        printf("details_comment: %s\n", ColUtf8[0] ? ColUtf8 : "(empty)");
+        printf("infotip: %s\n", TipUtf8[0] ? TipUtf8 : "(empty)");
+        Folder->lpVtbl->Release(Folder);
+    }
+    else
+    {
+        fprintf(stderr, "ai: SHBindToParent failed (0x%08lx)\n", (unsigned long)Hr);
+    }
+
+    CoTaskMemFree(Pidl);
+    CoUninitialize();
+    return SUCCEEDED(Hr) ? 0 : 1;
+}
+
 int wmain(int argc, wchar_t **argv)
 {
     if (argc < 2)
@@ -479,6 +553,8 @@ int wmain(int argc, wchar_t **argv)
         return CmdPrompt(argc, argv, AI_PROMPT_MODE_DO);
     if (_wcsicmp(argv[1], L"config") == 0)
         return CmdConfig(argc, argv);
+    if (_wcsicmp(argv[1], L"shelltip") == 0)
+        return CmdShellTip(argc, argv);
 
     PrintUsage();
     return 1;

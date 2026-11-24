@@ -24,10 +24,16 @@ static const AI_TOOL_POLICY_ENTRY g_ToolPolicy[] =
     { "list_directory",         AiTier0ReadOnly,   "path"    },
     { "get_folder_description", AiTier0ReadOnly,   "path"    },
     { "system_status",          AiTier0ReadOnly,   NULL      },
+    { "list_windows",           AiTier0ReadOnly,   NULL      },
+    { "inspect_window",         AiTier0ReadOnly,   "target"  },
     { "set_folder_description", AiTier1Reversible, "path"    },
+    { "focus_window",           AiTier1Reversible, "target"  },
+    { "arrange_windows",        AiTier1Reversible, "layout"  },
+    { "launch_app",             AiTier1Reversible, "app"     },
     { "write_file",             AiTier2Mutating,   "path"    },
     { "delete_file",            AiTier2Mutating,   "path"    },
-    { "run_command",            AiTier2Mutating,   "command" }
+    { "run_command",            AiTier2Mutating,   "command" },
+    { "close_window",           AiTier2Mutating,   "target"  }
 };
 
 static const char g_AskToolsSchema[] =
@@ -52,7 +58,14 @@ static const char g_AskToolsSchema[] =
     "\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}},"
     "{\"type\":\"function\",\"function\":{\"name\":\"system_status\","
     "\"description\":\"Return LiberNT AI index statistics and OS uptime/memory summary.\","
-    "\"parameters\":{\"type\":\"object\",\"properties\":{}}}}"
+    "\"parameters\":{\"type\":\"object\",\"properties\":{}}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"list_windows\","
+    "\"description\":\"List visible desktop application windows with titles, classes, and rectangles.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{}}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"inspect_window\","
+    "\"description\":\"Inspect visible child controls and text inside a desktop window.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{"
+    "\"target\":{\"type\":\"string\"}},\"required\":[\"target\"]}}}"
     "]";
 
 static const char g_DoToolsSchema[] =
@@ -78,12 +91,33 @@ static const char g_DoToolsSchema[] =
     "{\"type\":\"function\",\"function\":{\"name\":\"system_status\","
     "\"description\":\"Return LiberNT AI index statistics and OS uptime/memory summary.\","
     "\"parameters\":{\"type\":\"object\",\"properties\":{}}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"list_windows\","
+    "\"description\":\"List visible desktop application windows.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{}}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"inspect_window\","
+    "\"description\":\"Inspect visible child controls and text inside a desktop window.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{"
+    "\"target\":{\"type\":\"string\"}},\"required\":[\"target\"]}}},"
     "{\"type\":\"function\",\"function\":{\"name\":\"set_folder_description\","
     "\"description\":\"Set a user-visible NTFS description on a folder.\","
     "\"parameters\":{\"type\":\"object\",\"properties\":{"
     "\"path\":{\"type\":\"string\"},\"description\":{\"type\":\"string\"},"
     "\"tags\":{\"type\":\"string\"},\"source\":{\"type\":\"string\"}},"
     "\"required\":[\"path\",\"description\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"focus_window\","
+    "\"description\":\"Bring a desktop window to the foreground.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{"
+    "\"target\":{\"type\":\"string\"}},\"required\":[\"target\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"arrange_windows\","
+    "\"description\":\"Tile, split, maximize, minimize, or undo desktop window layout.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{"
+    "\"layout\":{\"type\":\"string\"},\"targets\":{\"type\":\"string\"}},"
+    "\"required\":[\"layout\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"launch_app\","
+    "\"description\":\"Launch a desktop application or open a file/folder.\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{"
+    "\"app\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}},"
+    "\"required\":[\"app\"]}}},"
     "{\"type\":\"function\",\"function\":{\"name\":\"write_file\","
     "\"description\":\"Create or overwrite a UTF-8 text file (Tier 2: requires explicit user approval).\","
     "\"parameters\":{\"type\":\"object\",\"properties\":{"
@@ -96,7 +130,11 @@ static const char g_DoToolsSchema[] =
     "{\"type\":\"function\",\"function\":{\"name\":\"run_command\","
     "\"description\":\"Run a cmd.exe command (Tier 2: requires explicit user approval).\","
     "\"parameters\":{\"type\":\"object\",\"properties\":{"
-    "\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}}}"
+    "\"command\":{\"type\":\"string\"}},\"required\":[\"command\"]}}},"
+    "{\"type\":\"function\",\"function\":{\"name\":\"close_window\","
+    "\"description\":\"Close an open desktop window (Tier 2: requires explicit user approval).\","
+    "\"parameters\":{\"type\":\"object\",\"properties\":{"
+    "\"target\":{\"type\":\"string\"}},\"required\":[\"target\"]}}}"
     "]";
 
 AI_CAPABILITY_TIER AiPolicyGetToolTier(const char *ToolName)

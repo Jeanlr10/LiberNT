@@ -13,10 +13,21 @@
 #include <windef.h>
 #include <winbase.h>
 #include <winnls.h>
+#undef WIN32_NO_STATUS
+#include <ntstatus.h>
+#include <ndk/lpcfuncs.h>
+#include <ndk/obfuncs.h>
+#include <ndk/rtlfuncs.h>
 
 #include "ai_json.h"
 #include "libai.h"
 #include "tools_win32.h"
+
+typedef struct _AI_DESKTOP_ALPC_PACKET
+{
+    PORT_MESSAGE Header;
+    AI_MSG_PAYLOAD Payload;
+} AI_DESKTOP_ALPC_PACKET;
 
 static BOOL Utf8ToWide(const char *Utf8, PWSTR OutW, DWORD OutChars)
 {
@@ -355,6 +366,116 @@ static int Win32GetSystemSummary(
     return 0;
 }
 
+static int Win32DesktopTool(
+    void *UserCtx,
+    const char *ToolName,
+    const char *ArgsJson,
+    char *OutJson,
+    size_t OutCap)
+{
+    UNICODE_STRING PortName;
+    ALPC_PORT_ATTRIBUTES Attrs;
+    AI_DESKTOP_ALPC_PACKET ConnPkt;
+    AI_DESKTOP_ALPC_PACKET SendPkt;
+    AI_DESKTOP_ALPC_PACKET RecvPkt;
+    SIZE_T Len;
+    LARGE_INTEGER Timeout;
+    HANDLE Port = NULL;
+    NTSTATUS Status;
+    size_t NameLen;
+    size_t ArgsLen;
+
+    UNREFERENCED_PARAMETER(UserCtx);
+
+    if (ToolName == NULL || OutJson == NULL || OutCap < 16)
+        return -1;
+    OutJson[0] = '\0';
+
+    RtlInitUnicodeString(&PortName, AI_DESKTOP_PORT_NAME);
+    RtlZeroMemory(&Attrs, sizeof(Attrs));
+    Attrs.SecurityQos.Length = sizeof(Attrs.SecurityQos);
+    Attrs.SecurityQos.ImpersonationLevel = SecurityImpersonation;
+    Attrs.SecurityQos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
+    Attrs.SecurityQos.EffectiveOnly = TRUE;
+    Attrs.MaxMessageLength = sizeof(AI_DESKTOP_ALPC_PACKET);
+
+    RtlZeroMemory(&ConnPkt, sizeof(ConnPkt));
+    ConnPkt.Header.u1.s1.DataLength = sizeof(ConnPkt.Payload);
+    ConnPkt.Header.u1.s1.TotalLength = sizeof(ConnPkt);
+    ConnPkt.Payload.Version = AI_PROTOCOL_VERSION;
+    ConnPkt.Payload.Opcode = AiOpPing;
+
+    Len = sizeof(ConnPkt);
+    Timeout.QuadPart = -(LONGLONG)3000 * 10000;
+    Status = NtAlpcConnectPort(
+        &Port,
+        &PortName,
+        NULL,
+        &Attrs,
+        ALPC_SYNC_CONNECTION,
+        NULL,
+        &ConnPkt.Header,
+        &Len,
+        NULL,
+        NULL,
+        &Timeout);
+    if (!NT_SUCCESS(Status))
+    {
+        _snprintf(OutJson, OutCap, "{\"error\":\"aishell desktop bridge unavailable (0x%08lx)\"}",
+                  (unsigned long)Status);
+        OutJson[OutCap - 1] = '\0';
+        return -1;
+    }
+
+    RtlZeroMemory(&SendPkt, sizeof(SendPkt));
+    RtlZeroMemory(&RecvPkt, sizeof(RecvPkt));
+    SendPkt.Header.u1.s1.DataLength = sizeof(SendPkt.Payload);
+    SendPkt.Header.u1.s1.TotalLength = sizeof(SendPkt);
+    SendPkt.Payload.Version = AI_PROTOCOL_VERSION;
+    SendPkt.Payload.Opcode = AiOpDesktopTool;
+
+    NameLen = strlen(ToolName);
+    if (NameLen >= sizeof(SendPkt.Payload.Data.DesktopTool.ToolName))
+        NameLen = sizeof(SendPkt.Payload.Data.DesktopTool.ToolName) - 1;
+    memcpy(SendPkt.Payload.Data.DesktopTool.ToolName, ToolName, NameLen);
+
+    if (ArgsJson != NULL)
+    {
+        ArgsLen = strlen(ArgsJson);
+        if (ArgsLen >= sizeof(SendPkt.Payload.Data.DesktopTool.ArgsJson))
+            ArgsLen = sizeof(SendPkt.Payload.Data.DesktopTool.ArgsJson) - 1;
+        memcpy(SendPkt.Payload.Data.DesktopTool.ArgsJson, ArgsJson, ArgsLen);
+    }
+
+    Len = sizeof(RecvPkt);
+    Timeout.QuadPart = -(LONGLONG)10000 * 10000;
+    Status = NtAlpcSendWaitReceivePort(
+        Port,
+        ALPC_MSGFLG_SYNC_REQUEST,
+        &SendPkt.Header,
+        NULL,
+        &RecvPkt.Header,
+        &Len,
+        NULL,
+        &Timeout);
+
+    NtAlpcDisconnectPort(Port, 0);
+    NtClose(Port);
+
+    if (!NT_SUCCESS(Status))
+    {
+        _snprintf(OutJson, OutCap, "{\"error\":\"aishell ALPC call failed (0x%08lx)\"}",
+                  (unsigned long)Status);
+        OutJson[OutCap - 1] = '\0';
+        return -1;
+    }
+
+    RecvPkt.Payload.Data.DesktopTool.ResultJson[sizeof(RecvPkt.Payload.Data.DesktopTool.ResultJson) - 1] = '\0';
+    _snprintf(OutJson, OutCap, "%s", RecvPkt.Payload.Data.DesktopTool.ResultJson);
+    OutJson[OutCap - 1] = '\0';
+    return (RecvPkt.Payload.Status == AiStatusOk) ? 0 : -1;
+}
+
 void AiWin32BuildAgentEnv(
     AI_WIN32_TOOL_CTX *Ctx,
     AI_AGENT_ENV *OutEnv)
@@ -368,4 +489,5 @@ void AiWin32BuildAgentEnv(
     OutEnv->RunCommandUtf8 = Win32RunCommandUtf8;
     OutEnv->WriteFolderAds = Win32WriteFolderAds;
     OutEnv->GetSystemSummary = Win32GetSystemSummary;
+    OutEnv->DesktopTool = Win32DesktopTool;
 }

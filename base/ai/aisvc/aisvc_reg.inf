@@ -1,4 +1,4 @@
-; LiberNT AI Broker and Semantic NTFS Indexer Service
+; LiberNT AI Broker, Semantic NTFS Indexer, and Desktop Shell Registration
 [AddReg]
 HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","DisplayName",0x00000000,"LiberNT AI Service"
 HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","Description",0x00000000,"Provides ALPC AI broker services, semantic NTFS indexing, and folder descriptions."
@@ -7,3 +7,10 @@ HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","ImagePath",0x00020000,"%SystemRo
 HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","ObjectName",0x00000000,"LocalSystem"
 HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","Type",0x00010001,0x00000010
+
+; Auto-start Win+Space AI command bar and desktop ALPC bridge in interactive sessions
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","LiberNtAiShell",0x00020000,"%SystemRoot%\system32\aishell.exe"
+
+; Explorer directory context menu entry for editing user-visible NTFS folder descriptions
+HKCR,"Directory\shell\LiberNtDescribe","",0x00000000,"Edit Folder Description..."
+HKCR,"Directory\shell\LiberNtDescribe\command","",0x00020000,"""%SystemRoot%\system32\aishell.exe"" --describe ""%1"""
