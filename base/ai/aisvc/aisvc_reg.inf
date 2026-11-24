@@ -1,0 +1,9 @@
+; LiberNT AI Broker and Semantic NTFS Indexer Service
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","DisplayName",0x00000000,"LiberNT AI Service"
+HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","Description",0x00000000,"Provides ALPC AI broker services, semantic NTFS indexing, and folder descriptions."
+HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","ImagePath",0x00020000,"%SystemRoot%\system32\aisvc.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\AiSvc","Type",0x00010001,0x00000010
