@@ -1,7 +1,7 @@
 /*
  * PROJECT:     LiberNT AI Subsystem
  * LICENSE:     GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
- * PURPOSE:     Pluggable IAiProvider interface and OpenAI-compatible codec definitions
+ * PURPOSE:     Pluggable IAiProvider interface (remote OpenAI-compatible + local on-device GGUF)
  * COPYRIGHT:   Copyright 2026 LiberNT Contributors
  */
 
@@ -21,18 +21,28 @@ extern "C" {
 #define AI_MAX_CHAT_TEXT         4096U
 #define AI_MAX_EMBED_DIM         256U
 
+#define AI_PROVIDER_REMOTE       "remote"
+#define AI_PROVIDER_LOCAL        "local"
+
 #define AI_DEFAULT_ENDPOINT      "http://10.0.2.2:11434/v1"
 #define AI_DEFAULT_MODEL         "llama3.2"
 #define AI_DEFAULT_EMBED_MODEL   "nomic-embed-text"
+#define AI_DEFAULT_LOCAL_MODEL   "C:\\ProgramData\\LiberNT\\AI\\models\\model.gguf"
 #define AI_DEFAULT_TIMEOUT_MS    30000U
+#define AI_DEFAULT_MAX_TOKENS    128U
 
 typedef struct _AI_PROVIDER_CONFIG
 {
+    char ProviderType[32];
     char Endpoint[256];
     char Model[128];
     char EmbedModel[128];
     char ApiKey[256];
+    char LocalModelPath[260];
+    char BackendInfo[160];
     uint32_t TimeoutMs;
+    uint32_t MaxTokens;
+    uint32_t Threads;
 } AI_PROVIDER_CONFIG;
 
 typedef struct _AI_TOOL_CALL
@@ -113,12 +123,16 @@ int AiOpenAiParseEmbedResponse(
     uint32_t MaxDim,
     uint32_t *OutDim);
 
-/* WinHTTP OpenAI-compatible provider & config persistence (Windows/LiberNT) */
+/* Portable local on-device GGUF provider (host-testable + LiberNT native) */
+AI_PROVIDER *AiProviderCreateLocal(const AI_PROVIDER_CONFIG *Cfg);
+
+/* WinHTTP OpenAI-compatible provider, factory, & Registry persistence (Windows/LiberNT) */
 #ifdef _WIN32
 void AiProviderDefaultConfig(AI_PROVIDER_CONFIG *Cfg);
 void AiProviderLoadConfigFromRegistry(AI_PROVIDER_CONFIG *Cfg);
 int AiProviderSaveConfigToRegistry(const AI_PROVIDER_CONFIG *Cfg);
 AI_PROVIDER *AiProviderCreateOpenAi(const AI_PROVIDER_CONFIG *Cfg);
+AI_PROVIDER *AiProviderCreateFromConfig(const AI_PROVIDER_CONFIG *Cfg);
 #endif
 
 #ifdef __cplusplus

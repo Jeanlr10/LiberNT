@@ -83,10 +83,15 @@ void AiProviderDefaultConfig(AI_PROVIDER_CONFIG *Cfg)
     if (Cfg == NULL)
         return;
     memset(Cfg, 0, sizeof(*Cfg));
+    CopyStrSafe(Cfg->ProviderType, sizeof(Cfg->ProviderType), AI_PROVIDER_REMOTE);
     CopyStrSafe(Cfg->Endpoint, sizeof(Cfg->Endpoint), AI_DEFAULT_ENDPOINT);
     CopyStrSafe(Cfg->Model, sizeof(Cfg->Model), AI_DEFAULT_MODEL);
     CopyStrSafe(Cfg->EmbedModel, sizeof(Cfg->EmbedModel), AI_DEFAULT_EMBED_MODEL);
+    CopyStrSafe(Cfg->LocalModelPath, sizeof(Cfg->LocalModelPath), AI_DEFAULT_LOCAL_MODEL);
+    CopyStrSafe(Cfg->BackendInfo, sizeof(Cfg->BackendInfo), "winhttp-openai");
     Cfg->TimeoutMs = AI_DEFAULT_TIMEOUT_MS;
+    Cfg->MaxTokens = AI_DEFAULT_MAX_TOKENS;
+    Cfg->Threads = 4U;
 }
 
 void AiProviderLoadConfigFromRegistry(AI_PROVIDER_CONFIG *Cfg)
@@ -102,14 +107,29 @@ void AiProviderLoadConfigFromRegistry(AI_PROVIDER_CONFIG *Cfg)
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, AI_REG_KEY, 0, KEY_READ, &Key) == ERROR_SUCCESS)
     {
+        ReadRegUtf8(Key, L"ProviderType", Cfg->ProviderType, sizeof(Cfg->ProviderType));
         ReadRegUtf8(Key, L"Endpoint", Cfg->Endpoint, sizeof(Cfg->Endpoint));
         ReadRegUtf8(Key, L"Model", Cfg->Model, sizeof(Cfg->Model));
         ReadRegUtf8(Key, L"EmbedModel", Cfg->EmbedModel, sizeof(Cfg->EmbedModel));
         ReadRegUtf8(Key, L"ApiKey", Cfg->ApiKey, sizeof(Cfg->ApiKey));
+        ReadRegUtf8(Key, L"LocalModelPath", Cfg->LocalModelPath, sizeof(Cfg->LocalModelPath));
+        Size = sizeof(Val);
         if (RegQueryValueExW(Key, L"TimeoutMs", NULL, &Type, (LPBYTE)&Val, &Size) == ERROR_SUCCESS &&
             Type == REG_DWORD && Val >= 1000 && Val <= 120000)
         {
             Cfg->TimeoutMs = Val;
+        }
+        Size = sizeof(Val);
+        if (RegQueryValueExW(Key, L"MaxTokens", NULL, &Type, (LPBYTE)&Val, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && Val >= 16 && Val <= 2048)
+        {
+            Cfg->MaxTokens = Val;
+        }
+        Size = sizeof(Val);
+        if (RegQueryValueExW(Key, L"Threads", NULL, &Type, (LPBYTE)&Val, &Size) == ERROR_SUCCESS &&
+            Type == REG_DWORD && Val >= 1 && Val <= 64)
+        {
+            Cfg->Threads = Val;
         }
         RegCloseKey(Key);
     }
@@ -120,6 +140,8 @@ int AiProviderSaveConfigToRegistry(const AI_PROVIDER_CONFIG *Cfg)
     HKEY Key = NULL;
     DWORD Disp = 0;
     DWORD Timeout;
+    DWORD MaxTok;
+    DWORD Threads;
 
     if (Cfg == NULL)
         return -1;
@@ -138,12 +160,18 @@ int AiProviderSaveConfigToRegistry(const AI_PROVIDER_CONFIG *Cfg)
         return -1;
     }
 
+    WriteRegUtf8(Key, L"ProviderType", Cfg->ProviderType[0] ? Cfg->ProviderType : AI_PROVIDER_REMOTE);
     WriteRegUtf8(Key, L"Endpoint", Cfg->Endpoint);
     WriteRegUtf8(Key, L"Model", Cfg->Model);
     WriteRegUtf8(Key, L"EmbedModel", Cfg->EmbedModel);
     WriteRegUtf8(Key, L"ApiKey", Cfg->ApiKey);
+    WriteRegUtf8(Key, L"LocalModelPath", Cfg->LocalModelPath);
     Timeout = Cfg->TimeoutMs ? Cfg->TimeoutMs : AI_DEFAULT_TIMEOUT_MS;
+    MaxTok = Cfg->MaxTokens ? Cfg->MaxTokens : AI_DEFAULT_MAX_TOKENS;
+    Threads = Cfg->Threads ? Cfg->Threads : 4U;
     RegSetValueExW(Key, L"TimeoutMs", 0, REG_DWORD, (const BYTE *)&Timeout, sizeof(Timeout));
+    RegSetValueExW(Key, L"MaxTokens", 0, REG_DWORD, (const BYTE *)&MaxTok, sizeof(MaxTok));
+    RegSetValueExW(Key, L"Threads", 0, REG_DWORD, (const BYTE *)&Threads, sizeof(Threads));
     RegCloseKey(Key);
     return 0;
 }
@@ -498,7 +526,23 @@ AI_PROVIDER *AiProviderCreateOpenAi(const AI_PROVIDER_CONFIG *Cfg)
         Prov->Cfg = *Cfg;
     else
         AiProviderLoadConfigFromRegistry(&Prov->Cfg);
+    CopyStrSafe(Prov->Cfg.ProviderType, sizeof(Prov->Cfg.ProviderType), AI_PROVIDER_REMOTE);
+    CopyStrSafe(Prov->Cfg.BackendInfo, sizeof(Prov->Cfg.BackendInfo), "winhttp-openai");
     if (Prov->Cfg.TimeoutMs == 0)
         Prov->Cfg.TimeoutMs = AI_DEFAULT_TIMEOUT_MS;
     return &Prov->Base;
+}
+
+AI_PROVIDER *AiProviderCreateFromConfig(const AI_PROVIDER_CONFIG *Cfg)
+{
+    AI_PROVIDER_CONFIG LocalCfg;
+
+    if (Cfg == NULL)
+    {
+        AiProviderLoadConfigFromRegistry(&LocalCfg);
+        Cfg = &LocalCfg;
+    }
+    if (_stricmp(Cfg->ProviderType, AI_PROVIDER_LOCAL) == 0)
+        return AiProviderCreateLocal(Cfg);
+    return AiProviderCreateOpenAi(Cfg);
 }

@@ -22,7 +22,7 @@
 
 static void PrintUsage(void)
 {
-    printf("LiberNT AI CLI (Milestone 2)\n");
+    printf("LiberNT AI CLI (Milestone 4)\n");
     printf("Usage:\n");
     printf("  ai status                                         Show aisvc health and index statistics\n");
     printf("  ai index                                          Run an immediate incremental NTFS crawl\n");
@@ -34,7 +34,7 @@ static void PrintUsage(void)
     printf("  ai ask <question...>                              Read-only grounded OS Q&A (Tier 0 tools only)\n");
     printf("  ai do [--yes|--deny] <instruction...>             Agent action mode with Tier 2 approval gate\n");
     printf("  ai config                                         Show active LLM provider configuration\n");
-    printf("  ai config set [--endpoint U] [--model M] [--embed-model E] [--api-key K]\n");
+    printf("  ai config set [--provider remote|local] [--model-path P] [--endpoint U] [--model M] [--max-tokens N]\n");
 }
 
 static BOOL WideArgToUtf8(PCWSTR Wide, char *Out, DWORD Cap)
@@ -418,7 +418,11 @@ static int CmdConfig(int Argc, wchar_t **Argv)
         memset(&Cfg, 0, sizeof(Cfg));
         for (i = 3; i + 1 < Argc; i += 2)
         {
-            if (_wcsicmp(Argv[i], L"--endpoint") == 0)
+            if (_wcsicmp(Argv[i], L"--provider") == 0)
+                WideArgToUtf8(Argv[i + 1], Cfg.ProviderType, sizeof(Cfg.ProviderType));
+            else if (_wcsicmp(Argv[i], L"--model-path") == 0)
+                WideArgToUtf8(Argv[i + 1], Cfg.LocalModelPath, sizeof(Cfg.LocalModelPath));
+            else if (_wcsicmp(Argv[i], L"--endpoint") == 0)
                 WideArgToUtf8(Argv[i + 1], Cfg.Endpoint, sizeof(Cfg.Endpoint));
             else if (_wcsicmp(Argv[i], L"--model") == 0)
                 WideArgToUtf8(Argv[i + 1], Cfg.Model, sizeof(Cfg.Model));
@@ -431,6 +435,10 @@ static int CmdConfig(int Argc, wchar_t **Argv)
             }
             else if (_wcsicmp(Argv[i], L"--timeout") == 0)
                 Cfg.TimeoutMs = (uint32_t)_wtol(Argv[i + 1]);
+            else if (_wcsicmp(Argv[i], L"--max-tokens") == 0)
+                Cfg.MaxTokens = (uint32_t)_wtol(Argv[i + 1]);
+            else if (_wcsicmp(Argv[i], L"--threads") == 0)
+                Cfg.Threads = (uint32_t)_wtol(Argv[i + 1]);
         }
 
         Res = AiClientSetProviderConfig(Port, &Cfg);
@@ -452,10 +460,14 @@ static int CmdConfig(int Argc, wchar_t **Argv)
         return 1;
     }
 
+    printf("provider: %s\n", Cfg.ProviderType[0] ? Cfg.ProviderType : "remote");
+    printf("backend: %s\n", Cfg.BackendInfo[0] ? Cfg.BackendInfo : "(default)");
+    printf("local_model: %s\n", Cfg.LocalModelPath);
     printf("endpoint: %s\n", Cfg.Endpoint);
     printf("model: %s\n", Cfg.Model);
     printf("embed_model: %s\n", Cfg.EmbedModel);
     printf("api_key: %s\n", Cfg.HasApiKey ? "(configured)" : "(none)");
+    printf("max_tokens: %u\n", Cfg.MaxTokens);
     printf("timeout_ms: %u\n", Cfg.TimeoutMs);
     return 0;
 }

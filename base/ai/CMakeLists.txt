@@ -38,7 +38,9 @@ add_executable(aisvc
     aisvc/tools_win32.c
     provider/ai_json.c
     provider/openai_codec.c
-    provider/provider_openai.c)
+    provider/provider_openai.c
+    provider/gguf_engine.c
+    provider/provider_local.c)
 set_module_type(aisvc win32cui UNICODE)
 target_link_libraries(aisvc ai_store)
 add_importlibs(aisvc libai winhttp advapi32 msvcrt kernel32 ntdll)

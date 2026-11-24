@@ -103,6 +103,7 @@ static VOID EnsureDataDir(VOID)
     CreateDirectoryW(L"C:\\ProgramData", NULL);
     CreateDirectoryW(L"C:\\ProgramData\\LiberNT", NULL);
     CreateDirectoryW(L"C:\\ProgramData\\LiberNT\\AI", NULL);
+    CreateDirectoryW(L"C:\\ProgramData\\LiberNT\\AI\\models", NULL);
 }
 
 static AI_CLIENT_SLOT *AllocClientSlot(VOID)
@@ -415,9 +416,15 @@ static VOID HandleRequest(const AI_MSG_PAYLOAD *Req, AI_MSG_PAYLOAD *Resp)
 
             Resp->Data.Config.TimeoutMs = Cfg.TimeoutMs;
             Resp->Data.Config.HasApiKey = (Cfg.ApiKey[0] != '\0') ? 1 : 0;
+            Resp->Data.Config.MaxTokens = Cfg.MaxTokens;
+            Resp->Data.Config.Threads = Cfg.Threads;
+            CopySafeStr(Resp->Data.Config.ProviderType, sizeof(Resp->Data.Config.ProviderType),
+                        Cfg.ProviderType[0] ? Cfg.ProviderType : AI_PROVIDER_REMOTE);
             CopySafeStr(Resp->Data.Config.Endpoint, sizeof(Resp->Data.Config.Endpoint), Cfg.Endpoint);
             CopySafeStr(Resp->Data.Config.Model, sizeof(Resp->Data.Config.Model), Cfg.Model);
             CopySafeStr(Resp->Data.Config.EmbedModel, sizeof(Resp->Data.Config.EmbedModel), Cfg.EmbedModel);
+            CopySafeStr(Resp->Data.Config.LocalModelPath, sizeof(Resp->Data.Config.LocalModelPath), Cfg.LocalModelPath);
+            CopySafeStr(Resp->Data.Config.BackendInfo, sizeof(Resp->Data.Config.BackendInfo), Cfg.BackendInfo);
             Resp->Data.Config.ApiKey[0] = '\0';
             break;
         }
@@ -428,16 +435,24 @@ static VOID HandleRequest(const AI_MSG_PAYLOAD *Req, AI_MSG_PAYLOAD *Resp)
             AI_PROVIDER *NewProv;
 
             AiProviderLoadConfigFromRegistry(&Cfg);
+            if (Req->Data.Config.ProviderType[0] != '\0')
+                CopySafeStr(Cfg.ProviderType, sizeof(Cfg.ProviderType), Req->Data.Config.ProviderType);
             if (Req->Data.Config.Endpoint[0] != '\0')
                 CopySafeStr(Cfg.Endpoint, sizeof(Cfg.Endpoint), Req->Data.Config.Endpoint);
             if (Req->Data.Config.Model[0] != '\0')
                 CopySafeStr(Cfg.Model, sizeof(Cfg.Model), Req->Data.Config.Model);
             if (Req->Data.Config.EmbedModel[0] != '\0')
                 CopySafeStr(Cfg.EmbedModel, sizeof(Cfg.EmbedModel), Req->Data.Config.EmbedModel);
+            if (Req->Data.Config.LocalModelPath[0] != '\0')
+                CopySafeStr(Cfg.LocalModelPath, sizeof(Cfg.LocalModelPath), Req->Data.Config.LocalModelPath);
             if (Req->Data.Config.HasApiKey)
                 CopySafeStr(Cfg.ApiKey, sizeof(Cfg.ApiKey), Req->Data.Config.ApiKey);
             if (Req->Data.Config.TimeoutMs >= 1000 && Req->Data.Config.TimeoutMs <= 120000)
                 Cfg.TimeoutMs = Req->Data.Config.TimeoutMs;
+            if (Req->Data.Config.MaxTokens >= 16 && Req->Data.Config.MaxTokens <= 2048)
+                Cfg.MaxTokens = Req->Data.Config.MaxTokens;
+            if (Req->Data.Config.Threads >= 1 && Req->Data.Config.Threads <= 64)
+                Cfg.Threads = Req->Data.Config.Threads;
 
             if (AiProviderSaveConfigToRegistry(&Cfg) != 0)
             {
@@ -445,7 +460,7 @@ static VOID HandleRequest(const AI_MSG_PAYLOAD *Req, AI_MSG_PAYLOAD *Resp)
                 break;
             }
 
-            NewProv = AiProviderCreateOpenAi(&Cfg);
+            NewProv = AiProviderCreateFromConfig(&Cfg);
             if (NewProv == NULL)
             {
                 Resp->Status = AiStatusInternal;
@@ -458,7 +473,8 @@ static VOID HandleRequest(const AI_MSG_PAYLOAD *Req, AI_MSG_PAYLOAD *Resp)
             g_Provider = NewProv;
 
             if (g_Store != NULL)
-                AiStoreLogAudit(g_Store, 1, "set_provider_config", Cfg.Endpoint, "ok", Cfg.Model);
+                AiStoreLogAudit(g_Store, 1, "set_provider_config", Cfg.ProviderType, "ok",
+                                (_stricmp(Cfg.ProviderType, AI_PROVIDER_LOCAL) == 0) ? Cfg.LocalModelPath : Cfg.Endpoint);
             break;
         }
 
@@ -524,7 +540,7 @@ static DWORD RunAiServer(BOOL ConsoleMode)
     }
 
     AiProviderLoadConfigFromRegistry(&ProvCfg);
-    g_Provider = AiProviderCreateOpenAi(&ProvCfg);
+    g_Provider = AiProviderCreateFromConfig(&ProvCfg);
 
     g_ToolCtx.Store = g_Store;
     g_ToolCtx.Indexer = g_Indexer;

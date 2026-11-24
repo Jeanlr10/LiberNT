@@ -103,10 +103,15 @@ typedef struct _AI_CONFIG_DATA
 {
     uint32_t TimeoutMs;
     uint32_t HasApiKey;
+    uint32_t MaxTokens;
+    uint32_t Threads;
+    char ProviderType[32];
     char Endpoint[256];
     char Model[128];
     char EmbedModel[128];
     char ApiKey[256];
+    char LocalModelPath[AI_MAX_PATH_UTF8];
+    char BackendInfo[160];
 } AI_CONFIG_DATA;
 
 typedef struct _AI_MSG_PAYLOAD
