@@ -3,8 +3,9 @@
 # Optional llama.cpp nested cross-build producing a self-contained llama.dll
 # against LiberNT's ReactOS SDK + libc++ + ucrtbase runtime.
 
+option(ENABLE_LIBERNT_AI "Build LiberNT AI subsystem" ON)
 option(ENABLE_LIBERNT_AI_LLAMACPP "Build llama.dll from submodules/llama.cpp" ON)
-if(NOT ENABLE_LIBERNT_AI_LLAMACPP)
+if(NOT ENABLE_LIBERNT_AI OR NOT ENABLE_LIBERNT_AI_LLAMACPP)
     return()
 endif()
 
