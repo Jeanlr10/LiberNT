@@ -15,3 +15,5 @@ endif()
 if(ENABLE_LXGPU)
     include(lxgpu.cmake)
 endif()
+
+include(llama-cpp.cmake)

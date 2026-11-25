@@ -848,7 +848,19 @@ int AiAgentAutoDescribeFolder(
     }
     else
     {
-        CopyStrSafe(GenDesc, sizeof(GenDesc), Resp.Content);
+        /* Small local models may reply with multi-line prose; keep the first concise line. */
+        const char *Src = Resp.Content;
+        size_t OutLen = 0;
+
+        while (*Src == ' ' || *Src == '\t' || *Src == '\r' || *Src == '\n')
+            Src++;
+        while (*Src != '\0' && *Src != '\r' && *Src != '\n' && OutLen + 1 < sizeof(GenDesc) && OutLen < 160U)
+        {
+            GenDesc[OutLen++] = *Src++;
+        }
+        while (OutLen > 0 && (GenDesc[OutLen - 1] == ' ' || GenDesc[OutLen - 1] == '\t'))
+            OutLen--;
+        GenDesc[OutLen] = '\0';
     }
 
     if (GenDesc[0] == '\0')

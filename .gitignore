@@ -22,4 +22,5 @@ feeds.conf
 /submodules/felix86/
 /submodules/fex-arm64ec/
 /submodules/ffmpeg/
+/submodules/llama.cpp/
 /submodules/mesa/
