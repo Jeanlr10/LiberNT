@@ -32,10 +32,14 @@ typedef struct _MOCK_ENV_STATE
     int Writes;
     int Deletes;
     int AdsWrites;
+    int CommandsRun;
+    uint32_t LastTimeoutMs;
     char LastWritePath[256];
     char LastWriteContent[512];
     char LastAdsDesc[256];
     char LastAdsSource[32];
+    char LastCmd[256];
+    char LastCwd[256];
 } MOCK_ENV_STATE;
 
 static int MockListDir(void *Ctx, const char *DirPath, char *OutBuf, size_t OutCap)
@@ -84,6 +88,26 @@ static int MockWriteAds(void *Ctx, const char *Dir, const char *Desc, const char
     St->AdsWrites++;
     snprintf(St->LastAdsDesc, sizeof(St->LastAdsDesc), "%s", Desc);
     snprintf(St->LastAdsSource, sizeof(St->LastAdsSource), "%s", Source ? Source : "");
+    return 0;
+}
+
+static int MockRunCommand(
+    void *Ctx,
+    const char *Cmd,
+    const char *Cwd,
+    uint32_t TimeoutMs,
+    char *OutBuf,
+    size_t OutCap,
+    int *OutExitCode)
+{
+    MOCK_ENV_STATE *St = (MOCK_ENV_STATE *)Ctx;
+    St->CommandsRun++;
+    St->LastTimeoutMs = TimeoutMs;
+    snprintf(St->LastCmd, sizeof(St->LastCmd), "%s", Cmd ? Cmd : "");
+    snprintf(St->LastCwd, sizeof(St->LastCwd), "%s", Cwd ? Cwd : "");
+    snprintf(OutBuf, OutCap, "Image Name PID\naisvc.exe 412\n");
+    if (OutExitCode)
+        *OutExitCode = 0;
     return 0;
 }
 
@@ -175,6 +199,40 @@ static int MockChat(
         /* Auto-describe folder */
         snprintf(OutResp->Content, sizeof(OutResp->Content),
                  "{\"description\":\"Quarterly financial budgets and 2026 expense receipts\",\"tags\":\"finance,taxes,2026\"}");
+        return 0;
+    }
+
+    if (Mp->Scenario == 6)
+    {
+        /* Ask mode: read-only run_command (tasklist) -> allowed at Tier 0 */
+        if (Mp->Turn == 1)
+        {
+            OutResp->ToolCallCount = 1;
+            snprintf(OutResp->ToolCalls[0].Id, sizeof(OutResp->ToolCalls[0].Id), "call_ro_cmd");
+            snprintf(OutResp->ToolCalls[0].Name, sizeof(OutResp->ToolCalls[0].Name), "run_command");
+            snprintf(OutResp->ToolCalls[0].ArgumentsJson, sizeof(OutResp->ToolCalls[0].ArgumentsJson),
+                     "{\"command\":\"tasklist\",\"cwd\":\"C:\\\\Windows\",\"timeout_ms\":5000}");
+            return 0;
+        }
+        snprintf(OutResp->Content, sizeof(OutResp->Content),
+                 "Processes: %s",
+                 (MsgCount > 0 && Msgs[MsgCount - 1].Content) ? Msgs[MsgCount - 1].Content : "");
+        return 0;
+    }
+
+    if (Mp->Scenario == 7)
+    {
+        /* Do mode: mutating run_command (taskkill) -> Tier 2 approval -> approved */
+        if (Mp->Turn == 1)
+        {
+            OutResp->ToolCallCount = 1;
+            snprintf(OutResp->ToolCalls[0].Id, sizeof(OutResp->ToolCalls[0].Id), "call_mut_cmd");
+            snprintf(OutResp->ToolCalls[0].Name, sizeof(OutResp->ToolCalls[0].Name), "run_command");
+            snprintf(OutResp->ToolCalls[0].ArgumentsJson, sizeof(OutResp->ToolCalls[0].ArgumentsJson),
+                     "{\"command\":\"taskkill /F /IM notepad.exe\"}");
+            return 0;
+        }
+        snprintf(OutResp->Content, sizeof(OutResp->Content), "Terminated notepad.exe.");
         return 0;
     }
 
@@ -295,7 +353,39 @@ static void TestPolicyAndAgent(void)
     CHECK(AiPolicyEvaluate("write_file", 1, 0) == AiPolicyDeny, "Tier 2 denied in ask mode");
     CHECK(AiPolicyEvaluate("write_file", 0, 0) == AiPolicyNeedApproval, "Tier 2 requires approval in do mode");
     CHECK(AiPolicyEvaluate("close_window", 0, 0) == AiPolicyNeedApproval, "Desktop Tier 2 close_window requires approval in do mode");
+    CHECK(AiPolicyEvaluate("get_clipboard", 1, 0) == AiPolicyAllow, "get_clipboard Tier 0 allowed in ask mode");
+    CHECK(AiPolicyEvaluate("set_clipboard", 1, 0) == AiPolicyDeny, "set_clipboard Tier 1 denied in ask mode");
+    CHECK(AiPolicyEvaluate("set_clipboard", 0, 0) == AiPolicyAllow, "set_clipboard Tier 1 allowed in do mode");
+    CHECK(AiPolicyEvaluate("click_control", 0, 0) == AiPolicyNeedApproval, "click_control Tier 2 requires approval");
+    CHECK(AiPolicyEvaluate("send_keys", 0, 0) == AiPolicyNeedApproval, "send_keys Tier 2 requires approval");
+    CHECK(AiPolicyEvaluate("power_action", 0, 0) == AiPolicyNeedApproval, "power_action Tier 2 requires approval");
     CHECK(AiPolicyEvaluate("unknown_tool", 0, 0) == AiPolicyDeny, "unknown tool denied");
+
+    /* Fail-closed shell risk classifier checks */
+    CHECK(AiPolicyClassifyCommand("tasklist") == AiTier0ReadOnly, "tasklist is Tier 0");
+    CHECK(AiPolicyClassifyCommand("TASKLIST.EXE /V") == AiTier0ReadOnly, "TASKLIST.EXE is Tier 0");
+    CHECK(AiPolicyClassifyCommand("sc query aisvc") == AiTier0ReadOnly, "sc query is Tier 0");
+    CHECK(AiPolicyClassifyCommand("reg query HKLM\\SYSTEM") == AiTier0ReadOnly, "reg query is Tier 0");
+    CHECK(AiPolicyClassifyCommand("ipconfig /all") == AiTier0ReadOnly, "ipconfig /all is Tier 0");
+    CHECK(AiPolicyClassifyCommand("netstat -ano") == AiTier0ReadOnly, "netstat is Tier 0");
+    CHECK(AiPolicyClassifyCommand("netsh interface show interface") == AiTier0ReadOnly, "netsh show is Tier 0");
+    CHECK(AiPolicyClassifyCommand("fsutil volume diskfree C:") == AiTier0ReadOnly, "fsutil volume diskfree is Tier 0");
+    CHECK(AiPolicyClassifyCommand("sc stop aisvc") == AiTier2Mutating, "sc stop is Tier 2");
+    CHECK(AiPolicyClassifyCommand("reg add HKCU\\Test") == AiTier2Mutating, "reg add is Tier 2");
+    CHECK(AiPolicyClassifyCommand("ipconfig /release") == AiTier2Mutating, "ipconfig /release is Tier 2");
+    CHECK(AiPolicyClassifyCommand("taskkill /F /IM notepad.exe") == AiTier2Mutating, "taskkill is Tier 2");
+    CHECK(AiPolicyClassifyCommand("dir & del foo.txt") == AiTier2Mutating, "chained command is Tier 2");
+    CHECK(AiPolicyClassifyCommand("tasklist | findstr aisvc") == AiTier2Mutating, "piped command is Tier 2");
+    CHECK(AiPolicyClassifyCommand("tasklist > out.txt") == AiTier2Mutating, "redirected command is Tier 2");
+    CHECK(AiPolicyClassifyCommand("echo %PATH%") == AiTier2Mutating, "env expansion is Tier 2");
+    CHECK(AiPolicyClassifyCommand("C:\\evil\\tasklist.exe") == AiTier2Mutating, "explicit path binary is Tier 2");
+    CHECK(AiPolicyClassifyCommand("netsh interface set interface") == AiTier2Mutating, "netsh set is Tier 2");
+    CHECK(AiPolicyEvaluateCall("run_command", "{\"command\":\"tasklist\"}", 1, 0) == AiPolicyAllow,
+          "read-only run_command allowed in ask mode");
+    CHECK(AiPolicyEvaluateCall("run_command", "{\"command\":\"sc stop aisvc\"}", 1, 0) == AiPolicyDeny,
+          "mutating run_command denied in ask mode");
+    CHECK(AiPolicyEvaluateCall("run_command", "{\"command\":\"sc stop aisvc\"}", 0, 0) == AiPolicyNeedApproval,
+          "mutating run_command requires approval in do mode");
 
     CHECK(AiStoreOpen(":memory:", &Store) == 0, "open in-memory SQLite store");
 
@@ -315,6 +405,7 @@ static void TestPolicyAndAgent(void)
     Env.ReadFileSnippet = MockReadSnippet;
     Env.WriteFileUtf8 = MockWriteFile;
     Env.DeleteFileUtf8 = MockDeleteFile;
+    Env.RunCommandUtf8 = MockRunCommand;
     Env.WriteFolderAds = MockWriteAds;
 
     memset(&Prov, 0, sizeof(Prov));
@@ -394,6 +485,29 @@ static void TestPolicyAndAgent(void)
                                     Desc, sizeof(Desc), Tags, sizeof(Tags), Source, sizeof(Source)) == AiStatusOk,
           "auto-describe --force overwrites when explicitly asked");
     CHECK(strstr(Desc, "Quarterly financial budgets") != NULL, "forced description updated");
+
+    /* Scenario 6: Ask mode executes read-only run_command with cwd/timeout_ms directly at Tier 0 */
+    Prov.Scenario = 6;
+    Prov.Turn = 0;
+    CHECK(AiAgentRunPrompt(Agent, "what processes are running?", AI_PROMPT_MODE_ASK, &Res) == AiStatusOk,
+          "run ask read-only shell command");
+    CHECK(Res.State == AiPromptDone, "read-only shell command completed without approval");
+    CHECK(EnvState.CommandsRun == 1, "read-only shell command executed once");
+    CHECK(strcmp(EnvState.LastCmd, "tasklist") == 0, "command string forwarded");
+    CHECK(strcmp(EnvState.LastCwd, "C:\\Windows") == 0 && EnvState.LastTimeoutMs == 5000U,
+          "cwd and timeout_ms forwarded");
+    CHECK(strstr(Res.ReplyText, "aisvc.exe") != NULL, "reply grounded in command output");
+
+    /* Scenario 7: Do mode gates mutating run_command at Tier 2 */
+    Prov.Scenario = 7;
+    Prov.Turn = 0;
+    CHECK(AiAgentRunPrompt(Agent, "kill notepad", AI_PROMPT_MODE_DO, &Res) == AiStatusOk,
+          "run do mutating shell command");
+    CHECK(Res.State == AiPromptPendingApproval && Res.ToolTier == 2,
+          "mutating shell command paused for Tier 2 approval");
+    CHECK(EnvState.CommandsRun == 1, "mutating command NOT run before approval");
+    CHECK(AiAgentResolveApproval(Agent, Res.ApprovalId, 1, &Res) == AiStatusOk, "approve mutating shell command");
+    CHECK(Res.State == AiPromptDone && EnvState.CommandsRun == 2, "mutating command executed after approval");
 
     AiAgentDestroy(Agent);
     AiStoreClose(Store);

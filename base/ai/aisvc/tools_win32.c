@@ -241,6 +241,8 @@ static int Win32DeleteFileUtf8(
 static int Win32RunCommandUtf8(
     void *UserCtx,
     const char *CommandUtf8,
+    const char *CwdUtf8,
+    uint32_t TimeoutMs,
     char *OutBuf,
     size_t OutCap,
     int *OutExitCode)
@@ -248,20 +250,42 @@ static int Win32RunCommandUtf8(
     SECURITY_ATTRIBUTES Sa;
     HANDLE ReadPipe = NULL;
     HANDLE WritePipe = NULL;
+    HANDLE Job = NULL;
     STARTUPINFOW Si;
     PROCESS_INFORMATION Pi;
-    WCHAR CmdW[512];
-    WCHAR FullCmdW[600];
+    WCHAR CmdW[2048];
+    WCHAR FullCmdW[2100];
+    WCHAR CwdW[MAX_PATH];
+    PCWSTR UseCwd = NULL;
     DWORD TotalRead = 0;
     DWORD ExitCode = 0;
+    ULONGLONG StartMs;
+    ULONGLONG LimitMs;
+    BOOL Truncated = FALSE;
+    BOOL TimedOut = FALSE;
 
     UNREFERENCED_PARAMETER(UserCtx);
 
-    if (!Utf8ToWide(CommandUtf8, CmdW, ARRAYSIZE(CmdW)) || OutBuf == NULL || OutCap < 2)
+    if (!Utf8ToWide(CommandUtf8, CmdW, ARRAYSIZE(CmdW)) || OutBuf == NULL || OutCap < 32)
         return -1;
     OutBuf[0] = '\0';
     if (OutExitCode)
         *OutExitCode = -1;
+
+    if (CwdUtf8 != NULL && CwdUtf8[0] != '\0')
+    {
+        if (!Utf8ToWide(CwdUtf8, CwdW, ARRAYSIZE(CwdW)))
+            return -1;
+        UseCwd = CwdW;
+    }
+
+    if (TimeoutMs == 0)
+        TimeoutMs = 15000U;
+    if (TimeoutMs < 1000U)
+        TimeoutMs = 1000U;
+    if (TimeoutMs > 60000U)
+        TimeoutMs = 60000U;
+    LimitMs = (ULONGLONG)TimeoutMs;
 
     _snwprintf(FullCmdW, ARRAYSIZE(FullCmdW), L"cmd.exe /c %s", CmdW);
     FullCmdW[ARRAYSIZE(FullCmdW) - 1] = UNICODE_NULL;
@@ -282,7 +306,9 @@ static int Win32RunCommandUtf8(
     Si.hStdInput = INVALID_HANDLE_VALUE;
 
     memset(&Pi, 0, sizeof(Pi));
-    if (!CreateProcessW(NULL, FullCmdW, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &Si, &Pi))
+    if (!CreateProcessW(NULL, FullCmdW, NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW | CREATE_SUSPENDED,
+                        NULL, UseCwd, &Si, &Pi))
     {
         CloseHandle(ReadPipe);
         CloseHandle(WritePipe);
@@ -292,25 +318,96 @@ static int Win32RunCommandUtf8(
     CloseHandle(WritePipe);
     WritePipe = NULL;
 
+    Job = CreateJobObjectW(NULL, NULL);
+    if (Job != NULL)
+    {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION Jeli;
+        memset(&Jeli, 0, sizeof(Jeli));
+        Jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(Job, JobObjectExtendedLimitInformation, &Jeli, sizeof(Jeli));
+        AssignProcessToJobObject(Job, Pi.hProcess);
+    }
+
+    ResumeThread(Pi.hThread);
+    StartMs = GetTickCount64();
+
     for (;;)
     {
-        DWORD Chunk = 0;
-        DWORD Space = (DWORD)(OutCap - 1 - TotalRead);
-        if (Space == 0)
-            break;
-        if (!ReadFile(ReadPipe, OutBuf + TotalRead, Space, &Chunk, NULL) || Chunk == 0)
-            break;
-        TotalRead += Chunk;
-    }
-    OutBuf[TotalRead] = '\0';
+        DWORD Avail = 0;
+        BOOL PeekOk = PeekNamedPipe(ReadPipe, NULL, 0, NULL, &Avail, NULL);
 
-    if (WaitForSingleObject(Pi.hProcess, 10000) == WAIT_TIMEOUT)
-        TerminateProcess(Pi.hProcess, 1);
+        if (PeekOk && Avail > 0)
+        {
+            char Discard[256];
+            DWORD Chunk = 0;
+            DWORD Space = (TotalRead < OutCap - 24) ? (DWORD)(OutCap - 24 - TotalRead) : 0;
+
+            if (Space > 0)
+            {
+                DWORD ToRead = (Avail < Space) ? Avail : Space;
+                if (ReadFile(ReadPipe, OutBuf + TotalRead, ToRead, &Chunk, NULL) && Chunk > 0)
+                    TotalRead += Chunk;
+                else
+                    break;
+            }
+            else
+            {
+                DWORD ToRead = (Avail < sizeof(Discard)) ? Avail : (DWORD)sizeof(Discard);
+                Truncated = TRUE;
+                if (!ReadFile(ReadPipe, Discard, ToRead, &Chunk, NULL) || Chunk == 0)
+                    break;
+            }
+            continue;
+        }
+
+        if (WaitForSingleObject(Pi.hProcess, 25) == WAIT_OBJECT_0)
+        {
+            /* Drain any final buffered bytes after process exit */
+            while (PeekNamedPipe(ReadPipe, NULL, 0, NULL, &Avail, NULL) && Avail > 0)
+            {
+                DWORD Chunk = 0;
+                DWORD Space = (TotalRead < OutCap - 24) ? (DWORD)(OutCap - 24 - TotalRead) : 0;
+                if (Space == 0)
+                {
+                    Truncated = TRUE;
+                    break;
+                }
+                if (!ReadFile(ReadPipe, OutBuf + TotalRead, (Avail < Space) ? Avail : Space, &Chunk, NULL) ||
+                    Chunk == 0)
+                {
+                    break;
+                }
+                TotalRead += Chunk;
+            }
+            break;
+        }
+
+        if (!PeekOk)
+            break;
+
+        if ((GetTickCount64() - StartMs) >= LimitMs)
+        {
+            TimedOut = TRUE;
+            if (Job != NULL)
+                TerminateJobObject(Job, 124);
+            TerminateProcess(Pi.hProcess, 124);
+            WaitForSingleObject(Pi.hProcess, 1000);
+            break;
+        }
+    }
+
+    OutBuf[TotalRead] = '\0';
+    if (Truncated && TotalRead + 18 < OutCap)
+        strcat(OutBuf, "\n...[truncated]");
+    if (TimedOut && strlen(OutBuf) + 20 < OutCap)
+        strcat(OutBuf, "\n...[timed out]");
 
     GetExitCodeProcess(Pi.hProcess, &ExitCode);
     if (OutExitCode)
-        *OutExitCode = (int)ExitCode;
+        *OutExitCode = TimedOut ? 124 : (int)ExitCode;
 
+    if (Job != NULL)
+        CloseHandle(Job);
     CloseHandle(Pi.hThread);
     CloseHandle(Pi.hProcess);
     CloseHandle(ReadPipe);

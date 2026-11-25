@@ -31,8 +31,20 @@ typedef enum _AI_POLICY_DECISION
 
 AI_CAPABILITY_TIER AiPolicyGetToolTier(const char *ToolName);
 
+AI_CAPABILITY_TIER AiPolicyClassifyCommand(const char *CommandUtf8);
+
+AI_CAPABILITY_TIER AiPolicyGetEffectiveTier(
+    const char *ToolName,
+    const char *ArgsJson);
+
 AI_POLICY_DECISION AiPolicyEvaluate(
     const char *ToolName,
+    int AskOnlyMode,
+    int RequireApprovalTier1);
+
+AI_POLICY_DECISION AiPolicyEvaluateCall(
+    const char *ToolName,
+    const char *ArgsJson,
     int AskOnlyMode,
     int RequireApprovalTier1);
 

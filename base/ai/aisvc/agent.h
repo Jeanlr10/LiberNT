@@ -51,6 +51,8 @@ typedef struct _AI_AGENT_ENV
     int (*RunCommandUtf8)(
         void *UserCtx,
         const char *CommandUtf8,
+        const char *CwdUtf8,
+        uint32_t TimeoutMs,
         char *OutBuf,
         size_t OutCap,
         int *OutExitCode);

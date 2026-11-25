@@ -15,15 +15,26 @@ MOCK_LOG="/tmp/libernt_gui_mock_openai.log"
 
 USE_MOCK=1
 PERSIST=0
+NO_NET=0
+LOCAL_MODEL=""
 DISPLAY_BACKEND="gtk"
 
-for arg in "$@"; do
-    case "$arg" in
+while [ $# -gt 0 ]; do
+    case "$1" in
         --no-mock) USE_MOCK=0 ;;
+        --no-net) NO_NET=1; USE_MOCK=0 ;;
         --persist) PERSIST=1 ;;
         --sdl) DISPLAY_BACKEND="sdl" ;;
         --gtk) DISPLAY_BACKEND="gtk" ;;
+        --local-model)
+            shift
+            LOCAL_MODEL="${1:-}"
+            ;;
+        --local-model=*)
+            LOCAL_MODEL="${1#*=}"
+            ;;
     esac
+    shift
 done
 
 if [ ! -f "$IMG" ]; then
@@ -59,6 +70,48 @@ if [ "$USE_MOCK" -eq 1 ]; then
     fi
 fi
 
+MODELS_IMG="/tmp/libernt_gui_models.img"
+EXTRA_QEMU_ARGS=()
+
+if [ -n "$LOCAL_MODEL" ]; then
+    if [ ! -f "$LOCAL_MODEL" ]; then
+        echo "Error: local model $LOCAL_MODEL not found." >&2
+        exit 1
+    fi
+    NTFSIMG="$BUILD_DIR/host-tools/bin/ntfsimg"
+    MKDISKIMG="$BUILD_DIR/host-tools/bin/mkdiskimg"
+    MODELS_PART="/tmp/libernt_gui_models.ntfs"
+    MODELS_LIST="/tmp/libernt_gui_models.lst"
+    MODELS_CMD="/tmp/libernt_gui_enable_local.cmd"
+    MODEL_BASE="$(basename "$LOCAL_MODEL")"
+    MODEL_BYTES="$(stat -c%s "$LOCAL_MODEL")"
+    SECTORS=$(( (MODEL_BYTES / 512) + 65536 ))
+    if [ "$SECTORS" -lt 32768 ]; then
+        SECTORS=32768
+    fi
+    SECTORS=$(( (SECTORS + 7) & ~7 ))
+
+    rm -f "$MODELS_IMG" "$MODELS_PART" "$MODELS_LIST" "$MODELS_CMD"
+    printf '@echo off\r\nai config set --provider local --model-path D:\\%s --max-tokens 128\r\nai config\r\npause\r\n' "$MODEL_BASE" > "$MODELS_CMD"
+    printf '%s=%s\nenable_local_ai.cmd=%s\n' "$MODEL_BASE" "$LOCAL_MODEL" "$MODELS_CMD" > "$MODELS_LIST"
+    "$NTFSIMG" --format "$MODELS_PART" "$SECTORS" 2048 8 MODELS >/dev/null
+    "$NTFSIMG" --addfiles "$MODELS_PART" "$MODELS_LIST" >/dev/null
+    "$MKDISKIMG" -o "$MODELS_IMG" -partition "$MODELS_PART" -start 2048 -type 07 >/dev/null
+    rm -f "$MODELS_PART" "$MODELS_LIST" "$MODELS_CMD"
+
+    EXTRA_QEMU_ARGS+=(
+        -drive "id=disk1,if=none,format=raw,file=$MODELS_IMG"
+        -device "ide-hd,drive=disk1,bus=ahci.1"
+    )
+    echo "Mounted local GGUF model on D:\\$MODEL_BASE (run D:\\enable_local_ai.cmd inside LiberNT)"
+fi
+
+if [ "$NO_NET" -eq 1 ]; then
+    EXTRA_QEMU_ARGS+=(-nic none)
+else
+    EXTRA_QEMU_ARGS+=(-netdev user,id=net0 -device e1000e,netdev=net0)
+fi
+
 echo "Launching LiberNT AI OS interactive GUI VM (serial log: $SERIAL_LOG)..."
 qemu-system-x86_64 \
     -machine q35,accel=kvm \
@@ -70,8 +123,7 @@ qemu-system-x86_64 \
     -drive "id=disk0,if=none,format=qcow2,file=$OVERLAY" \
     -device ich9-ahci,id=ahci \
     -device ide-hd,drive=disk0,bus=ahci.0 \
-    -netdev user,id=net0 \
-    -device e1000e,netdev=net0 \
+    "${EXTRA_QEMU_ARGS[@]}" \
     -usb -device usb-tablet \
     -vga std \
     -display "$DISPLAY_BACKEND" \

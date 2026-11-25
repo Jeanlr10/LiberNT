@@ -51,14 +51,18 @@ struct _AI_AGENT
 
 static const char g_SystemPromptAsk[] =
     "You are the LiberNT OS assistant (read-only Ask mode). "
-    "Use search_files, read_file_snippet, list_directory, get_folder_description, and system_status "
-    "to ground your answers in real local files and folder descriptions. Be concise and accurate.";
+    "Use search_files, read_file_snippet, list_directory, get_folder_description, system_status, "
+    "list_windows, inspect_window, get_clipboard, and read-only run_command "
+    "(e.g. tasklist, sc query, reg query, ipconfig, netstat, systeminfo, driverquery, dir, whoami, hostname, ver, where, findstr) "
+    "to ground your answers in real local OS state. Be concise and accurate.";
 
 static const char g_SystemPromptDo[] =
-    "You are the LiberNT OS agent (Action mode). "
-    "Use search_files, read_file_snippet, list_directory, get_folder_description, set_folder_description, "
-    "system_status, write_file, delete_file, and run_command as needed. "
-    "Prefer inspecting existing files/descriptions before mutating anything. Be concise.";
+    "You are the LiberNT OS operator (Action mode). "
+    "Prefer run_command for OS administration (processes, services, registry, networking, file operations, diagnostics: "
+    "tasklist/taskkill, sc, reg, ipconfig, netstat, systeminfo, move/copy/mkdir/del); read-only commands execute directly while "
+    "mutating or chained commands are approval-gated. Use semantic NTFS tools (search_files, get/set_folder_description, "
+    "read_file_snippet, write_file) and desktop tools (list/inspect/focus/arrange/close_window, launch_app, "
+    "get/set_clipboard, click_control, send_keys, power_action) for files and GUI tasks. Be concise.";
 
 static void CopyStrSafe(char *Dst, size_t Cap, const char *Src)
 {
@@ -440,8 +444,10 @@ static int ExecuteTool(
 
     if (strcmp(Call->Name, "run_command") == 0)
     {
-        char Cmd[512];
-        char CmdOut[1536];
+        char Cmd[2048];
+        char Cwd[AI_MAX_PATH_UTF8];
+        int64_t TimeoutMs = 15000;
+        char CmdOut[3072];
         int ExitCode = 0;
         AI_JSON_BUF Buf;
 
@@ -450,13 +456,22 @@ static int ExecuteTool(
             CopyStrSafe(OutBuf, OutCap, "{\"error\":\"missing command\"}");
             return -1;
         }
+        Cwd[0] = '\0';
+        AiJsonObjGetString(Args, ArgsLen, "cwd", Cwd, sizeof(Cwd));
+        AiJsonObjGetInt64(Args, ArgsLen, "timeout_ms", &TimeoutMs);
+        if (TimeoutMs < 1000)
+            TimeoutMs = 1000;
+        if (TimeoutMs > 60000)
+            TimeoutMs = 60000;
+
         if (Agent->Env.RunCommandUtf8 == NULL)
         {
             CopyStrSafe(OutBuf, OutCap, "{\"error\":\"run_command unavailable\"}");
             return -1;
         }
         CmdOut[0] = '\0';
-        if (Agent->Env.RunCommandUtf8(Agent->Env.UserCtx, Cmd, CmdOut, sizeof(CmdOut), &ExitCode) != 0)
+        if (Agent->Env.RunCommandUtf8(Agent->Env.UserCtx, Cmd, Cwd[0] ? Cwd : NULL,
+                                      (uint32_t)TimeoutMs, CmdOut, sizeof(CmdOut), &ExitCode) != 0)
         {
             CopyStrSafe(OutBuf, OutCap, "{\"error\":\"run_command failed\"}");
             return -1;
@@ -477,7 +492,12 @@ static int ExecuteTool(
         strcmp(Call->Name, "focus_window") == 0 ||
         strcmp(Call->Name, "arrange_windows") == 0 ||
         strcmp(Call->Name, "launch_app") == 0 ||
-        strcmp(Call->Name, "close_window") == 0)
+        strcmp(Call->Name, "close_window") == 0 ||
+        strcmp(Call->Name, "get_clipboard") == 0 ||
+        strcmp(Call->Name, "set_clipboard") == 0 ||
+        strcmp(Call->Name, "click_control") == 0 ||
+        strcmp(Call->Name, "send_keys") == 0 ||
+        strcmp(Call->Name, "power_action") == 0)
     {
         if (Agent->Env.DesktopTool == NULL)
         {
@@ -555,10 +575,10 @@ static int ContinueLoop(
 
         {
             const AI_TOOL_CALL *Call = &ChatResp.ToolCalls[0];
-            AI_CAPABILITY_TIER Tier = AiPolicyGetToolTier(Call->Name);
-            AI_POLICY_DECISION Decision = AiPolicyEvaluate(Call->Name, AskOnly, 0);
+            AI_CAPABILITY_TIER Tier = AiPolicyGetEffectiveTier(Call->Name, Call->ArgumentsJson);
+            AI_POLICY_DECISION Decision = AiPolicyEvaluateCall(Call->Name, Call->ArgumentsJson, AskOnly, 0);
             char Target[AI_MAX_PATH_UTF8];
-            char ToolResult[2048];
+            char ToolResult[4096];
 
             AiPolicyExtractTarget(Call->Name, Call->ArgumentsJson, Target, sizeof(Target));
 
@@ -713,7 +733,7 @@ int AiAgentResolveApproval(
     uint32_t Mode;
     uint32_t RoundsUsed;
     uint32_t ToolCallsExecuted;
-    char ToolResult[2048];
+    char ToolResult[4096];
 
     if (Agent == NULL || OutResult == NULL || ApprovalId == 0)
         return AiStatusInvalidArg;

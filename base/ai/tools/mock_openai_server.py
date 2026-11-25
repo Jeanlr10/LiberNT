@@ -215,6 +215,72 @@ def handle_chat(body: dict):
             ]
         }
 
+    if "set_clipboard" in tool_names and "copy clipboard" in prompt_low:
+        txt = prompt.split("copy clipboard", 1)[1].strip() or "LiberNT Clipboard OK"
+        args = json.dumps({"text": txt})
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_setclip_1",
+                                "type": "function",
+                                "function": {"name": "set_clipboard", "arguments": args},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+    if "get_clipboard" in tool_names and "read clipboard" in prompt_low:
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_getclip_1",
+                                "type": "function",
+                                "function": {"name": "get_clipboard", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
+    if "send_keys" in tool_names and "type into" in prompt_low:
+        parts = prompt.split("type into", 1)[1].strip().split(":", 1)
+        target = parts[0].strip() or "Notepad"
+        text = parts[1].strip() if len(parts) > 1 else "Hello from LiberNT AI"
+        args = json.dumps({"target": target, "text": text, "enter": True})
+        return {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_keys_1",
+                                "type": "function",
+                                "function": {"name": "send_keys", "arguments": args},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+
     # 5. First turn: search_files for file/note/tax/fiscal questions
     if "search_files" in tool_names and any(
         k in prompt_low for k in ("find", "search", "tax", "fiscal", "plan", "note", "where")
